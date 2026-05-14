@@ -6,7 +6,7 @@ BSL syntax and style validation via BSL Language Server.
 
 | Tool | Purpose | When to use |
 |---|---|---|
-| **syntaxcheck** | Check BSL syntax and style via BSL Language Server | After writing code — verify no errors. **Limit: 3 calls per cycle** |
+| **syntaxcheck** | Check BSL syntax and style via BSL Language Server | After writing code — verify no errors. **Limit: 1 call per cycle by default, up to 3 only if a substantive defect remains** |
 
 ## Input format
 
@@ -17,6 +17,8 @@ BSL syntax and style validation via BSL Language Server.
 
 - A **cycle** is one logical edit of one module, from the first edit until either a clean `syntaxcheck` is achieved or the limit is exhausted.
 - Each new edit of the module starts a new cycle.
-- The same limit (3 calls) applies to `check_1c_code` and `review_1c_code` from `1c-code-check-mcp`.
+- **Default budget** — 1 call per cycle. Run the validator, fix what it found, deliver.
+- **Re-run budget** — up to 3 total calls per validator per cycle, but only when the previous run returned a **substantive defect**: logic / metadata / data integrity / security / transaction / lock / performance-critical. Style, naming, formatting, BSLLS noise — do **not** re-run; fix in the edit and move on.
+- The same policy applies to `check_1c_code` and `review_1c_code` from `1c-code-check-mcp`.
 - Once the limit is hit — fix the substantive errors and move on; style warnings after the limit do not block delivery.
 - It only makes sense to re-run `syntaxcheck` after an actual code edit — re-runs without changes are forbidden (see `AGENTS.md → MCP Tool Calling`).

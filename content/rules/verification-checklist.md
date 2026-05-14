@@ -20,7 +20,7 @@ You MUST run all five gates in order. Each gate has an explicit pass / fail crit
 
 - Run `syntaxcheck` on every touched `.bsl` module. No exceptions.
 - Pass criterion: zero `error` items. `warning` items are reviewed in Gate 3.
-- Retry budget: at most **3 calls of this validator per cycle** (per `AGENTS.md → MCP Tool Calling → B. Limits and non-determinism`). Gates 2 and 3 have the same per-validator limit. A "cycle" is one logical edit of one module; every new edit starts a new cycle.
+- Retry budget: **1 call by default, up to 3 only if the previous run returned a substantive defect** (per `AGENTS.md → MCP Tool Calling → B. Limits and non-determinism`). Gates 2 and 3 share the same per-validator policy. A "cycle" is one logical edit of one module; every new edit starts a new cycle. Style / formatting / BSLLS noise alone does **not** justify a re-run.
 
 If the budget is exhausted with substantive errors remaining: fix the substantive errors, document any remaining style warnings in the delivery summary, and stop. Do not loop infinitely on style noise.
 

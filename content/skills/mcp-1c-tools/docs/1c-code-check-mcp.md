@@ -35,4 +35,4 @@
 
 ## Call limit
 
-`check_1c_code` and `review_1c_code` — maximum 3 calls per module-edit cycle (same limit as `syntaxcheck`). Do not re-call them if the code has not changed since the previous run.
+`check_1c_code` and `review_1c_code` — **1 call per module-edit cycle by default**, up to 3 total **only** when the previous run returned a substantive defect (logic / metadata / data integrity / security / transaction / lock / performance-critical). Style warnings, naming nits, BSLLS noise do **not** justify a re-run — fix them in the edit and move on. Do not re-call when the code has not changed since the previous run. For pure metadata-XML changes with no BSL touched, these tools are usually irrelevant — skip in favor of `verify_xml`. Full policy: `AGENTS.md → MCP Tool Calling → B. Limits and non-determinism`.

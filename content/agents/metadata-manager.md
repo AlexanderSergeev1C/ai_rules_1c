@@ -76,7 +76,7 @@ See the **MCP Tool Calling** section in the project's `AGENTS.md` and the `mcp-1
 **Other tools:**
 - **docsearch** — verify platform functions and XML element names
 - **templatesearch** — find examples of metadata structures
-- **syntaxcheck** — validate BSL module code (limit: 3x per cycle)
+- **syntaxcheck** — validate BSL module code (limit: 1 per cycle by default, up to 3 only on substantive defects — see `AGENTS.md → MCP Tool Calling → B.1`)
 
 ## Important Rules
 

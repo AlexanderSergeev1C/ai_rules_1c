@@ -76,7 +76,7 @@ The pipeline removes those failure modes by separating **what to build** (planne
 
 Apply the matrix from `AGENTS.md → Triage: Quick-fix vs Full-cycle`. **Only** full-cycle tasks enter the pipeline. If the task is a quick-fix, edit directly and skip to stage 5 with a minimal verification (`syntaxcheck` only).
 
-If the user asks for a small change that **looks** like a quick-fix but the change touches metadata, a transactional path, a public common-module export, or an extension's adopted object — promote it to full-cycle. When in doubt, full-cycle wins.
+If the user asks for a small change that **looks** like a quick-fix but the change touches a transactional path, a public common-module export, an extension's adopted object, an event subscription / scheduled job / RLS condition, or metadata wired into existing behavior (rename / remove / immediate-use, RLS / indexing / fill-check changes) — promote it to full-cycle. **Isolated metadata additions** that satisfy the "Isolated metadata addition" clause in `AGENTS.md → Triage` (new independent register / defined type / enumeration / constant / unwired attribute, with no consumer touched in the same change) stay on the quick-fix path. When in doubt, full-cycle wins.
 
 ### Stage 2 — Plan (delegate to a planning subagent)
 

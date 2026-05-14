@@ -23,7 +23,7 @@ You are an expert 1C error resolution specialist focused on fixing syntax errors
 See the **MCP Tool Calling** section in the project's `AGENTS.md` and the `mcp-1c-tools` skill (`content/skills/mcp-1c-tools/SKILL.md`) for tool descriptions. Follow the `powershell-windows` skill for shell commands.
 
 **Key tools for error fixing:**
-- **syntaxcheck** — check code for syntax errors (limit: 3x per cycle)
+- **syntaxcheck** — check code for syntax errors (limit: 1 per cycle by default, up to 3 only on substantive defects — see `AGENTS.md → MCP Tool Calling → B.1`)
 - **docsearch** — verify built-in function existence/syntax
 - **codesearch** — find correct usage patterns
 - **search_function** — find the problematic procedure/function by name

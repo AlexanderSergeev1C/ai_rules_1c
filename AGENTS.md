@@ -26,13 +26,22 @@ Basic principle: **caution over speed**. For trivial tasks (typo fixes, obvious 
 
 ### Triage: Quick-fix vs Docs-fix vs Full-cycle
 
-- **Quick-fix path** — only when **all** are true: single file / single procedure or function; <~20 lines; no metadata / transactional / architectural impact; bug reproducible and fix obvious. Then a short cycle: 2-line plan → edit → applicable validation (`syntaxcheck` for BSL) → done.
+- **Quick-fix path** — single file / single procedure or function or **a single isolated metadata addition** (see below); <~20 lines of BSL when BSL is touched; no transactional / architectural impact; fix or change obvious. Short cycle: 2-line plan → edit → applicable validation (`syntaxcheck` for BSL, `verify_xml` for metadata XML, both for metadata that embeds BSL) → done.
 - **Docs-fix path** — changes touch only Markdown / rules / docs (no BSL, no metadata XML). Skip BSL validators (`syntaxcheck`, `check_1c_code`, `review_1c_code`) — they do not apply. Replace them with structural checks: referenced paths exist, links resolve, anchors / file names match, no duplicated rules with conflicting wording. Size threshold does not gate this path.
 - **Full-cycle path** — everything else; apply all 5 steps below in full. When in doubt — full-cycle.
 
+**Isolated metadata addition (allowed as quick-fix).** A metadata change qualifies as quick-fix **only** when **all** of the following hold:
+
+- it is a **new** isolated object — independent information register (`Независимый`, no registrar) with ≤3 dimensions / ≤2 resources / no module; defined type; enumeration; constant; new attribute on an existing reference object **that is not yet referenced from any code, query, RLS condition, fill-check, or form**;
+- no existing module / query / RLS condition / event subscription / scheduled job is modified in the same change;
+- no posting (`ОбработкаПроведения`) / `ПередЗаписью` / `ПриЗаписи` / extension interceptor / role permission is touched;
+- the object does not participate in БСП-managed subsystems requiring `ПриОпределенииПодсистемСКоторымиВозможнаИнтеграция` registration in the same change.
+
+If the same task also wires the new object into existing code (a query, a movement, a form, an export) — that wiring is a separate change; either keep the wiring out of this task (deliver the isolated object first), or promote the whole task to full-cycle.
+
 **Promote to full-cycle even if the change looks small.** If the change touches any of the following — escalate from quick-fix:
 
-- metadata (new / renamed / removed object, attribute, tabular section, form, role);
+- metadata wired into existing behavior — renaming or removing an object / attribute / tabular section / form / role; modifying an existing posting / write path because of the metadata change; adding a metadata object that is immediately used by existing modules in the same change; changes to RLS conditions, indexing of an existing dimension, fill-checks, or event subscriptions;
 - a transactional code path (`ОбработкаПроведения`, `ПередЗаписью` / `ПриЗаписи`, anything inside `НачалоТранзакции`);
 - a public `Экспорт` procedure / function of a common module (signature, return type, side effects);
 - an adopted object of an extension (`ObjectBelonging=Adopted`);
@@ -162,8 +171,13 @@ Step-by-step playbooks per task type (writing code, review, architecture, error 
 
 ### B. Limits and non-determinism
 
-1. **Verification budget — up to 3 calls per validator per cycle.** Applies separately to `syntaxcheck`, `check_1c_code`, and `review_1c_code` when validating BSL / metadata changes. A **cycle** = one logical edit of one module; every new edit starts a new cycle. After the limit — fix substantive errors and move on; style warnings do not block delivery. Markdown / rules / documentation edits use the docs-fix path checks instead.
-2. **AI-based MCP tools are non-deterministic.** `ask_1c_ai`, `rewrite_1c_code`, `modify_1c_code`, `answer_metadata_question` produce drafts, not authority. Re-validate output via `syntaxcheck` + `check_1c_code` + `review_1c_code` before delivery.
+1. **Verification budget — 1 call per validator by default; up to 3 only if the previous run returned a substantive defect.** Applies separately to `syntaxcheck`, `check_1c_code`, and `review_1c_code` when validating BSL / metadata changes. A **cycle** = one logical edit of one module; every new edit starts a new cycle.
+   - **Default** — one call per validator per cycle is enough. Run the validator, fix what it found, deliver.
+   - **Re-run (up to 3 total per validator)** is justified **only** when the previous run returned a **substantive defect**: a logic, metadata, data-integrity, security, transaction / lock, or performance-critical issue. Style warnings, naming nits, formatting issues, missing comments, BSLLS noise do **not** justify a re-run — fix them in the edit and move on.
+   - **After the limit** — fix the substantive errors and move on; style warnings do not block delivery.
+   - **Pure metadata-XML changes (no BSL touched)** — `check_1c_code` and `review_1c_code` are usually irrelevant; skip them unless the metadata change embeds BSL (object / manager module, form module, fill-check expression, predefined-item population). Use `verify_xml` once instead. `syntaxcheck` is still run on any BSL module touched, even indirectly (e.g. a form module regenerated by the metadata skill).
+   - Markdown / rules / documentation edits use the docs-fix path checks instead.
+2. **AI-based MCP tools are non-deterministic.** `ask_1c_ai`, `rewrite_1c_code`, `modify_1c_code`, `answer_metadata_question` produce drafts, not authority. Re-validate output via `syntaxcheck` + `check_1c_code` + `review_1c_code` before delivery (subject to the budget above).
 
 ### C. Call discipline (no duplication)
 
