@@ -1459,6 +1459,22 @@ function Resolve-CopyToPath {
     return $p
 }
 
+# Resolve a manifest key (relative or already-absolute) to an absolute filesystem
+# path. Manifest keys for adapters whose `copyTo` starts with `~/` (currently
+# codex `commands`) are stored as absolute paths by `Invoke-PlaceArtifactFile`;
+# every other key is project-relative. Iteration over `$manifest.files.Keys`
+# must go through this helper instead of `Join-Path $Root $rel`, otherwise
+# absolute keys turn into garbage like `C:\Project\C:\Users\...` and Test-Path
+# falsely reports the files as missing.
+function Resolve-ManifestPath {
+    param(
+        [string]$Root,
+        [string]$Rel
+    )
+    if ([System.IO.Path]::IsPathRooted($Rel)) { return $Rel }
+    return (Join-Path $Root $Rel)
+}
+
 function Invoke-PlaceArtifactFile {
     param(
         [string]$Root,
@@ -2328,7 +2344,7 @@ function Invoke-Verify {
     $mismatches = @()
     $count = 0
     foreach ($rel in $Manifest.files.Keys) {
-        $abs = Join-Path $Root $rel
+        $abs = Resolve-ManifestPath -Root $Root -Rel $rel
         if (-not (Test-Path $abs)) { $mismatches += "missing: $rel"; continue }
         $count++
         $actual = Get-FileSha256 $abs
@@ -2401,7 +2417,7 @@ function Invoke-Update {
     Write-Section 'Detecting user-modified files'
     $dirty = @()
     foreach ($rel in @($manifest.files.Keys)) {
-        $abs = Join-Path $Root $rel
+        $abs = Resolve-ManifestPath -Root $Root -Rel $rel
         if (-not (Test-Path $abs)) { continue }
         $actual = Get-FileSha256 $abs
         $expected = $manifest.files[$rel].installedHash

@@ -136,7 +136,16 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 The canonical project context (configuration name, platform version via `CompatibilityMode`, form mode, БСП version, top-level subsystems, metadata counts) lives in [`openspec/project.md`](openspec/project.md). The installer generates this file on `init` / `update` when the project contains `Configuration.xml`; in repositories that are not 1C source dumps the file is absent — in that case treat the project context as undefined, fall back to `.dev.env` for operational parameters, and ask the user for any context that is not in `.dev.env`. Absence of `openspec/project.md` is **not** a reason to stop.
 
-Operational parameters (platform version, platform path, infobase connection, web publication, prefix / developer / modification comments, policy for placing new objects) — the single source of truth is [`./.dev.env`](.dev.env). Do not duplicate these values in other files. If `.dev.env` is missing or the required field is empty — ask the user instead of guessing.
+Operational parameters (platform version, platform path, infobase connection, web publication, prefix / developer / modification comments, policy for placing new objects) — the single source of truth is [`./.dev.env`](.dev.env). Do not duplicate these values in other files.
+
+**No field in `.dev.env` is globally mandatory.** Every parameter is task-scoped — a missing value matters only when the **current** scheduled operation depends on it. Do not gather empties up front. Detailed classification (advisory / highly desirable / defaulted) and per-parameter behavior — in `content/rules/dev-standards-core.md §1 → "Global principle"`. Quick summary:
+
+- **Advisory** (`PREFIX`, `COMPANY`, `DEVELOPER`) — empty is valid; documented fallback applies (no prefix; no modification markers). **MUST NOT be asked about, ever.**
+- **Highly desirable for IB-bound operations** (`INFOBASE_PATH`, `IB_USER`, `IB_PASSWORD`, `PLATFORM_PATH`, `LOG_PATH`) — needed only for `/loadfrom1cbase`, `/update1cbase`, `/getconfigfiles`, `/deploy-and-test` and similar commands. Ask **only when that command is in scope of the current task**. Pure code / review / analysis / documentation tasks proceed even when this whole block is empty.
+- **Highly desirable for UI testing** (`INFOBASE_PUBLISH_URL`) — needed by the `1c-tester` subagent / `/deploy-and-test`. Empty = UI tests are silently skipped, the rest of the flow still runs. Ask only when the user explicitly requested UI tests.
+- **Defaulted** (`INFOBASE_KIND`, `EXTENSION_NAME`, `EXPORT_PATH`, `NEW_OBJECTS_IN`, `IBCMD_CONFIG`) — empty resolves to a documented default; no question.
+
+Guessing values is still PROHIBITED. When an in-scope operation truly needs a missing highly-desirable value, ask once and proceed.
 
 - The project is entirely in 1C (bsl) — no other programming languages.
 - **Source language policy.**
