@@ -81,6 +81,7 @@ function Get-RemoteMcpSettings {
         PortBase           = Get-DevEnvValue -Keys $keys -Key 'MCP_PORT_BASE'
         DocsPort           = Get-DevEnvValue -Keys $keys -Key 'MCP_DOCS_PORT'
         ImageTag           = Get-DevEnvValue -Keys $keys -Key 'MCP_IMAGE_TAG' -Default 'arm64'
+        ContainerTz        = Get-DevEnvValue -Keys $keys -Key 'MCP_CONTAINER_TZ' -Default 'Europe/Moscow'
         PlatformPath       = Get-DevEnvValue -Keys $keys -Key 'PLATFORM_PATH'
         PlatformVersion    = Get-DevEnvValue -Keys $keys -Key 'PLATFORM_VERSION'
     }

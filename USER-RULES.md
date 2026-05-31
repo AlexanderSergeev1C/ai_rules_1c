@@ -19,6 +19,7 @@ Environment invariants for this fork (two-machine workflow). These extend `AGENT
 - Each project gets a **port decade**: `MCP_PORT_BASE` … `MCP_PORT_BASE+9` (`8000–8009`, `8010–8019`, …).
 - **HelpSearchServer** is **platform-scoped** (not per project): id `1C-docs-mcp-<platform-version>`, port ≥8100; reuse index when the same platform version is already indexed on Mac.
 - Docker images on Mac: tag **`arm64`** (`MCP_IMAGE_TAG`) — **`:latest` is forbidden**.
+- Container timezone: `-e TZ=Europe/Moscow` (`MCP_CONTAINER_TZ` in `.dev.env`) on every `docker run`.
 - **v1 scope:** no `1c-graph-metadata-mcp`, no Neo4j, no LM Studio embeddings (deferred v2).
 
 ## Source URL

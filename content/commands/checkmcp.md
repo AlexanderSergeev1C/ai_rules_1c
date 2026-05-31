@@ -199,17 +199,20 @@ Command templates (minimal set without data preparation):
 ```powershell
 # 1c-syntax-checker-mcp
 docker run -d -p 8002:8002 --name 1c_syntaxcheck_mcp `
+  -e TZ=Europe/Moscow `
   -e LICENSE_KEY={LICENSE_KEY} `
   comol/1c_syntaxcheck_mcp:latest
 
 # 1c-templates-mcp
 docker run -d -p 8004:8004 --name 1c_templates_mcp `
+  -e TZ=Europe/Moscow `
   -e LICENSE_KEY={LICENSE_KEY} `
   -v "{DATA_ROOT}\mcp_templates:/app/chroma_db" `
   comol/1c_templates_mcp:latest
 
 # 1c-ssl-mcp
 docker run -d -p 8008:8008 --name mcp_ssl_server `
+  -e TZ=Europe/Moscow `
   -e LICENSE_KEY={LICENSE_KEY} `
   -e SSL_VERSION={SSL_VERSION} `
   -v "{DATA_ROOT}\mcp_ssl:/app/chroma_db" `
@@ -217,6 +220,7 @@ docker run -d -p 8008:8008 --name mcp_ssl_server `
 
 # 1C-docs-mcp
 docker run -d -p 8003:8003 --name 1c_help_mcp `
+  -e TZ=Europe/Moscow `
   -e LICENSE_KEY={LICENSE_KEY} `
   -v "{PLATFORM_BIN}:/1c_docs" `
   -v "{DATA_ROOT}\mcp_docs:/app/chroma_db" `
@@ -224,6 +228,7 @@ docker run -d -p 8003:8003 --name 1c_help_mcp `
 
 # 1c-code-metadata-mcp
 docker run -d -p 8000:8000 --name 1c_code_metadata_mcp `
+  -e TZ=Europe/Moscow `
   -e LICENSE_KEY={LICENSE_KEY} `
   -v "{EXPORT_PATH}:/app/configuration" `
   -v "{DATA_ROOT}\mcp_code_metadata:/app/chroma_db" `
@@ -234,6 +239,7 @@ docker run -d -p 8000:8000 --name 1c_code_metadata_mcp `
 
 # 1c-code-check-mcp
 docker run -d -p 8007:8007 --name 1c_code_checker_mcp `
+  -e TZ=Europe/Moscow `
   -e NAPARNIK_TOKEN={NAPARNIK_TOKEN} `
   comol/1c_code_checker_mcp:latest
 ```

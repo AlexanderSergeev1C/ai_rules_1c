@@ -67,7 +67,7 @@ Port offsets from `MCP_PORT_BASE`:
 | +7 | `1c-code-check-mcp` |
 | +8 | `1c-ssl-mcp` |
 
-All `docker pull` / `docker run` on Mac: replace `:latest` with `:{MCP_IMAGE_TAG}` (default `arm64`). Preflight: `ssh … "docker pull comol/1c_code_metadata_mcp:arm64"`.
+All `docker pull` / `docker run` on Mac: replace `:latest` with `:{MCP_IMAGE_TAG}` (default `arm64`); always pass `-e TZ=<MCP_CONTAINER_TZ>` (from `.dev.env`, default `Europe/Moscow`). Preflight: `ssh … "docker pull comol/1c_code_metadata_mcp:arm64"`.
 
 Distribution download for remote: unpack to Mac `~/MCP_Distr` (run download steps via `ssh …` with temp zip on Mac, or scp zip after Windows download — prefer downloading directly on Mac when possible).
 
@@ -312,7 +312,8 @@ For every server:
 3. Show the command to the user and **wait for confirmation** before running it. Images may be several GB; first launch is heavy.
 4. For `GraphMetadataSearch` use Compose: `cd <TARGET>\Graph_metadata_search; docker-compose up -d` after merging `config.env` values into `<TARGET>\Graph_metadata_search\.env`.
 5. If `USE_GPU=true`, add `--gpus all` right after `docker run -d` per the per-server file note.
-6. After each `docker run`, verify with `docker logs --tail 50 <container_name>` and report the first lines to the user.
+6. Always add `-e TZ=<MCP_CONTAINER_TZ>` to every `docker run` (from `.dev.env`, default `Europe/Moscow`; upstream/local: `-e TZ=Europe/Moscow` if `.dev.env` is absent).
+7. After each `docker run`, verify with `docker logs --tail 50 <container_name>` and report the first lines to the user.
 
 Skip servers whose required inputs are missing and explicitly list them in the final report.
 

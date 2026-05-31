@@ -15,6 +15,7 @@ When `MCP_HOST` in `.dev.env` is a LAN address, apply the same update cycle **on
 - Distribution directory: `~/MCP_Distr` on Mac (not `C:\Work\MCP_Distr`).
 - `docker pull` / `docker stop` / `docker run` via `ssh -F $MCP_SSH_CONFIG $MCP_SSH_HOST_ALIAS …`.
 - Image tag: **`arm64`** only (`MCP_IMAGE_TAG`) — never `:latest`.
+- Container timezone: `-e TZ=<MCP_CONTAINER_TZ>` (from `.dev.env`, default `Europe/Moscow`) on every `docker run`.
 - Ports: `MCP_PORT_BASE` + offsets; docs MCP on `MCP_DOCS_PORT` (platform-scoped).
 - **Skip GraphMetadata / Neo4j Compose** in v1 — update only containers that were installed in v1.
 - Volumes on Mac paths (`PATH_CODE`, `PATH_METADATA` under `/Users/al/1c/sync/`).
@@ -221,7 +222,7 @@ Pull is **mandatory** on update — this is the whole point of the command. Pull
 
 Use the exact `docker run` block from `<EXISTING>\servers\NN_*.md`, substituting `{{...}}` placeholders from the merged `<EXISTING>\config.env`. Show the command to the user with secrets masked (`-e LICENSE_KEY="***"`) and wait for confirmation. For GraphMetadata use `docker-compose up -d` in `<EXISTING>\Graph_metadata_search\`.
 
-If `USE_GPU=true`, add `--gpus all` right after `docker run -d` per the per-server file note.
+If `USE_GPU=true`, add `--gpus all` right after `docker run -d` per the per-server file note. Always add `-e TZ=<MCP_CONTAINER_TZ>` (from `.dev.env`, default `Europe/Moscow`) to every `docker run`.
 
 #### 6.5. Verify
 
