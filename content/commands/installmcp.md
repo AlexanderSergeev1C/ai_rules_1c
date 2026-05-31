@@ -27,6 +27,52 @@ MCP_Distr/
 
 Use `/checkmcp` to inspect already installed servers. Use `/updatemcp` to update an already installed set (and to re-fetch a newer distribution + new license keys).
 
+## Remote Mac workflow (fork — Windows + Mac mini)
+
+When `.dev.env` has `MCP_HOST` set to a LAN address (not `localhost` / `127.0.0.1`), this command installs MCP **on the Mac** via SSH + **OrbStack**, and Cursor on Windows connects to `http://{MCP_HOST}:<port>/mcp`.
+
+Load `content/rules/sync-to-mcp-host.md` when sync has not run yet.
+
+| Aspect | Upstream (local) | Fork (remote Mac) |
+|---|---|---|
+| Docker | `docker` on Windows | `ssh -F $MCP_SSH_CONFIG $MCP_SSH_HOST_ALIAS docker …` |
+| Preflight | `docker info` locally | `ssh -F … -o BatchMode=yes $alias "docker info"` |
+| Distribution dir | `C:\Work\MCP_Distr` on Windows | `~/MCP_Distr` on Mac (reuse if `INSTALL.md` exists) |
+| Ports | fixed 8000–8008 | `MCP_PORT_BASE` + offset per project (see below) |
+| Image tag | `:latest` in upstream docs | **`:arm64`** only (`MCP_IMAGE_TAG` in `.dev.env`) — **never `:latest` on Mac** |
+| `PATH_CODE` | Windows export path | `/Users/al/1c/sync/code-{ProjectName}/` on Mac |
+| `PATH_METADATA` | Windows report path | `/Users/al/1c/sync/metadata-{ProjectName}/` on Mac (synced in v1; GraphMetadata deferred v2) |
+| HelpSearchServer | port 8003 per install | **per platform version**, reuse when indexed (`1C-docs-mcp-<version>`, port ≥8100) |
+| GraphMetadata + Neo4j | install | **skip v1** — do not run Compose or `02_GraphMetadataSearch.md` |
+
+### Remote install order (v1)
+
+0. **Sync** — `/synctomcp` or `tools/sync-to-mcp-host.ps1` (if dump not yet on Mac).
+1. **Detect platform** — `tools/detect-platform.ps1` → `PLATFORM_PATH` on Windows.
+2. **Allocate ports** — `tools/allocate-mcp-ports.ps1` → `MCP_PORT_BASE` in `.dev.env` + `~/1c/mcp-registry.json` on Mac.
+3. **HelpSearchServer** — `tools/find-docs-mcp-on-mac.ps1`; if `Action=install`: `scp` `{PLATFORM_PATH}\bin` → `/Users/al/1c/platform/<version>/bin/`, new container with label `mcp.platform=<version>`, port from block ≥8100, image `comol/1c_help_mcp:arm64`. If `Action=reuse` — skip scp/reindex, set `MCP_DOCS_PORT`.
+4. **CodeMetadataSearchServer** — `MCP_PORT_BASE+0`, `PATH_CODE` = Mac sync path, `:arm64`.
+5. **SyntaxCheckServer** (+2), **Templates** (+4), **1CCodeChecker** (+7, if token), **SSLSearchServer** (+8) — all `:arm64`.
+6. **Skip GraphMetadataSearch** (+6 reserved) — v2 with Neo4j + LM Studio embeddings.
+7. **Re-render MCP config** — `install.ps1 update` or `/updaterules` so `.cursor/mcp.json` uses `{MCP_HOST}` and computed ports; **exclude `1c-graph-metadata-mcp`**.
+
+Port offsets from `MCP_PORT_BASE`:
+
+| Offset | Server |
+|---|---|
+| +0 | `1c-code-metadata-mcp` |
+| +2 | `1c-syntax-checker-mcp` |
+| +4 | `1c-templates-mcp` |
+| +6 | `1c-graph-metadata-mcp` (deferred v2) |
+| +7 | `1c-code-check-mcp` |
+| +8 | `1c-ssl-mcp` |
+
+All `docker pull` / `docker run` on Mac: replace `:latest` with `:{MCP_IMAGE_TAG}` (default `arm64`). Preflight: `ssh … "docker pull comol/1c_code_metadata_mcp:arm64"`.
+
+Distribution download for remote: unpack to Mac `~/MCP_Distr` (run download steps via `ssh …` with temp zip on Mac, or scp zip after Windows download — prefer downloading directly on Mac when possible).
+
+After containers are up, re-render the active tool MCP config and ask the user to restart Cursor.
+
 ## Steps
 
 ### 1. Choose the target directory and download the distribution

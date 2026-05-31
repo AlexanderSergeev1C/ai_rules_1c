@@ -62,3 +62,5 @@ Remove empty optional keys (`--user`, `--password`, `--extension`). `--recursive
 Objects are exported fully and strictly into `{EXPORT_PATH}`; no extra subdirectories are created. When exporting the main configuration, remove `-Extension {EXTENSION_NAME}`.
 
 3. Check `{LOG_PATH}` for errors.
+
+4. **Optional (remote MCP).** If `MCP_HOST` in `.dev.env` is set and not `localhost`, run `/synctomcp` to copy the updated export to the Mac host. See `content/rules/sync-to-mcp-host.md`.

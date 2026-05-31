@@ -90,3 +90,7 @@ The export goes **strictly into the specified directory**; no extra subdirectori
    - For `ibcmd`, success means no `error` / `ошибка` lines and no non-zero exit code reported.
 2. If errors exist, show the relevant log fragment to the user and stop.
 3. Briefly list which top-level object directories appeared or changed according to `git status`, without content diffs.
+
+## Step 4. Sync to remote MCP host (optional)
+
+If `MCP_HOST` in `.dev.env` is set and not `localhost`, run `/synctomcp` (or `tools/sync-to-mcp-host.ps1`) so the Mac host receives the fresh dump before reindex. See `content/rules/sync-to-mcp-host.md`.

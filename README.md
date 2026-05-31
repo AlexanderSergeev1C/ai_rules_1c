@@ -21,7 +21,7 @@
 
 Установка спроектирована как протокол, который выполняет сам ИИ-агент. Откройте проект в любимом ИИ-агенте (Cursor / Claude Code / Codex / OpenCode / Kilo Code) и отправьте сообщение:
 
-> Установи правила из `https://github.com/comol/ai_rules_1c` по `AGENT-INSTALL.md`.
+> Установи правила из `https://github.com/AlexanderSergeev1C/ai_rules_1c` по `AGENT-INSTALL.md`.
 
 Всё. Остальное — клонирование репозитория, определение активных инструментов, миграция существующих `AGENTS.md` / `CLAUDE.md`, запросы перед разрушительными действиями — описано в [`AGENT-INSTALL.md`](AGENT-INSTALL.md), который агент прочитает сам.
 
@@ -43,6 +43,21 @@ git clone https://github.com/comol/ai_rules_1c.git $env:TEMP\1c-rules
 ```
 
 Команды: `init` / `update` / `add <tool>` / `remove [<tool>]` / `doctor` / `eject`.
+
+## Двухмашинная установка (Windows + Mac mini)
+
+Этот форк поддерживает workflow, когда **1С и Cursor** работают на Windows, а **Docker / MCP-серверы** — на Mac mini (OrbStack, Apple Silicon):
+
+1. Выгрузите конфигурацию в файлы (`/loadfrom1cbase` или Конфигуратор).
+2. Сформируйте отчёт по конфигурации в соседнюю папку `{ИмяПроекта}_report/`.
+3. Установите правила из форка (`AGENT-INSTALL.md`) — `.dev.env` получит секцию **Remote MCP host** с дефолтами (`MCP_HOST=192.168.1.122`, SSH alias `mac-mini`).
+4. `/synctomcp` — копирует выгрузку в `code-{ProjectName}/` и отчёт в `metadata-{ProjectName}/` на Mac через SSH config.
+5. `/installmcp` — поднимает project-scoped MCP на Mac (образы **`:arm64`**, per-project port pool `8000–8009`, `8010–8019`, …); HelpSearchServer — **по версии платформы** с reuse; **без GraphMetadata/Neo4j в v1**.
+6. Cursor на Windows подключается к `http://{MCP_HOST}:<port>/mcp`; проверка — `/checkmcp`.
+
+Скрипты: `tools/sync-to-mcp-host.ps1`, `tools/allocate-mcp-ports.ps1`, `tools/detect-platform.ps1`, `tools/find-docs-mcp-on-mac.ps1`. Правило: `content/rules/sync-to-mcp-host.md`.
+
+Пустой `MCP_HOST` или `localhost` — поведение upstream (все MCP локально на Windows).
 
 ## Что внутри
 
@@ -67,12 +82,12 @@ git clone https://github.com/comol/ai_rules_1c.git $env:TEMP\1c-rules
 ├── content/
 │   ├── rules/               # on-demand правила, подключаемые по задаче
 │   ├── agents/              # описания 13 специализированных субагентов
-│   ├── commands/            # слэш-команды (doctor, deploy-and-test, getconfigfiles, loadfrom1cbase, update1cbase, checkmcp, installmcp, updatemcp, update)
+│   ├── commands/            # слэш-команды (doctor, deploy-and-test, getconfigfiles, loadfrom1cbase, synctomcp, update1cbase, checkmcp, installmcp, updatemcp, update)
 │   ├── skills/              # SKILL-пакеты (1c-metadata-manage, mermaid-diagrams и др.)
 │   ├── openspec-bundle/     # снапшот вывода `openspec init` для каждого инструмента
 │   └── mcp-servers.json     # каталог MCP-серверов экосистемы 1С
 ├── openspec/                # OpenSpec-воркспейс (specs/, changes/, project.md)
-└── tools/                   # вспомогательные скрипты (refresh-openspec-bundle.ps1)
+└── tools/                   # вспомогательные скрипты (refresh-openspec-bundle.ps1, sync-to-mcp-host.ps1, allocate-mcp-ports.ps1, detect-platform.ps1, find-docs-mcp-on-mac.ps1)
 ```
 
 ## Что появится в проекте после установки

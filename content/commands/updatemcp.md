@@ -8,6 +8,19 @@ This command updates already installed 1C MCP servers. It re-downloads the lates
 
 Use `/installmcp` for the very first installation (no existing containers, fresh `config.env`). Use `/checkmcp` to inspect the current state at any point.
 
+## Remote Mac workflow (fork)
+
+When `MCP_HOST` in `.dev.env` is a LAN address, apply the same update cycle **on the Mac via SSH** as documented in `/installmcp` → *Remote Mac workflow*:
+
+- Distribution directory: `~/MCP_Distr` on Mac (not `C:\Work\MCP_Distr`).
+- `docker pull` / `docker stop` / `docker run` via `ssh -F $MCP_SSH_CONFIG $MCP_SSH_HOST_ALIAS …`.
+- Image tag: **`arm64`** only (`MCP_IMAGE_TAG`) — never `:latest`.
+- Ports: `MCP_PORT_BASE` + offsets; docs MCP on `MCP_DOCS_PORT` (platform-scoped).
+- **Skip GraphMetadata / Neo4j Compose** in v1 — update only containers that were installed in v1.
+- Volumes on Mac paths (`PATH_CODE`, `PATH_METADATA` under `/Users/al/1c/sync/`).
+
+After update, re-render MCP config (`install.ps1 update` / `/updaterules`) and run `/checkmcp` from Windows (HTTP probe to `{MCP_HOST}`).
+
 ## Steps
 
 ### 1. Locate the existing installation

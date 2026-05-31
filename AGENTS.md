@@ -280,6 +280,7 @@ Load the corresponding file when the task matches the rule's scenario.
 ## Workflow and integrations
 
 - **getconfigfiles** — extracting configuration objects (metadata) from an information base into the repo. File: `content/rules/getconfigfiles.md`.
+- **sync-to-mcp-host** — sync configuration dump and report from Windows to remote Mac MCP host (SSH/scp). Load when `MCP_HOST` in `.dev.env` is set and not `localhost`, after export or before `/installmcp`. File: `content/rules/sync-to-mcp-host.md`.
 - **integrations-add** — code that integrates 1C with another system (HTTP services, REST, message queues). File: `content/rules/integrations-add.md`.
 - **refactor-add** — checklist and sequencing for safe refactoring. Load whenever the task is a refactoring. File: `content/rules/refactor-add.md`.
 - **sdd-integrations** — guidelines for working with OpenSpec. Load whenever reading or updating files under `openspec/`. File: `content/rules/sdd-integrations.md`.

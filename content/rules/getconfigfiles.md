@@ -63,3 +63,5 @@ Drop unset optional flags (`--user`, `--password`, `--extension`). `--recursive`
 When exporting from the main configuration (not from an extension) — drop the `-Extension {EXTENSION_NAME}` argument.
 
 **Step 3.** Inspect `{LOG_PATH}` for errors before starting any edits.
+
+**Step 4 (optional).** If `MCP_HOST` in `.dev.env` is set and not `localhost`, run `/synctomcp` or `tools/sync-to-mcp-host.ps1` to copy exported objects to the Mac MCP host. See `content/rules/sync-to-mcp-host.md`.

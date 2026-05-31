@@ -8,6 +8,18 @@ This command checks that all MCP servers from the project catalog (`content/mcp-
 
 The source of truth for images, ports, and environment variables is [docs.onerpa.ru/mcp-servery-1c](https://docs.onerpa.ru/mcp-servery-1c) and [vibecoding1c.ru/mcp_server](https://vibecoding1c.ru/mcp_server).
 
+## Remote Mac workflow (fork)
+
+When `MCP_HOST` in `.dev.env` is a LAN address (not `localhost`):
+
+1. Read ports from `.dev.env`: `MCP_PORT_BASE`, `MCP_DOCS_PORT` — do not assume fixed 8000–8008.
+2. HTTP probe from **Windows**: `http://{MCP_HOST}:<port>/mcp` for each server in the rendered MCP config.
+3. **Do not expect `1c-graph-metadata-mcp`** in v1 — it is excluded from the remote config.
+4. Docker state on Mac: `ssh -F $MCP_SSH_CONFIG -o BatchMode=yes $MCP_SSH_HOST_ALIAS "docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'"`. Verify images use tag **`arm64`**, not `latest`.
+5. Docs MCP id may be versioned: `1C-docs-mcp-<platform-version>` on port `MCP_DOCS_PORT` (≥8100).
+
+Helper: `tools/find-docs-mcp-on-mac.ps1` — checks reuse of HelpSearchServer by platform version.
+
 ## Target server catalog
 
 | id | Port | Docker image | Purpose | Requires data |
@@ -59,20 +71,33 @@ If status is **TOOLS_OK**, treat the server as working and do not check it furth
 
 ### Step 3. Check HTTP endpoint
 
-For servers with **TOOLS_MISSING**, call the HTTP endpoint. PowerShell (Windows):
+For servers with **TOOLS_MISSING**, call the HTTP endpoint. Read `{MCP_HOST}`, `MCP_PORT_BASE`, `MCP_DOCS_PORT` from `.dev.env` when probing a remote Mac; fall back to localhost + fixed ports when `MCP_HOST` is empty or `localhost`.
+
+PowerShell (Windows) — **remote** (ports from `.dev.env`):
 
 ```powershell
+$dev = @{}
+Get-Content '.dev.env' -Encoding UTF8 | ForEach-Object {
+    if ($_ -match '^([A-Z_][A-Z0-9_]*)=(.*)$') { $dev[$Matches[1]] = $Matches[2] }
+}
+$mcpHostAddr = if ($dev['MCP_HOST']) { $dev['MCP_HOST'].Trim() } else { 'localhost' }
+$base = if ($dev['MCP_PORT_BASE'] -match '^\d+$') { [int]$dev['MCP_PORT_BASE'] } else { 8000 }
+$docsPort = if ($dev['MCP_DOCS_PORT'] -match '^\d+$') { [int]$dev['MCP_DOCS_PORT'] } else { 8003 }
+$isRemote = $mcpHostAddr -and $mcpHostAddr -notin @('localhost','127.0.0.1')
+
 $servers = @(
-    @{ Id = '1c-code-metadata-mcp';   Port = 8000 },
-    @{ Id = '1c-syntax-checker-mcp';  Port = 8002 },
-    @{ Id = '1C-docs-mcp';            Port = 8003 },
-    @{ Id = '1c-templates-mcp';       Port = 8004 },
-    @{ Id = '1c-graph-metadata-mcp';  Port = 8006 },
-    @{ Id = '1c-code-check-mcp';      Port = 8007 },
-    @{ Id = '1c-ssl-mcp';             Port = 8008 }
+    @{ Id = '1c-code-metadata-mcp';   Port = $base + 0 },
+    @{ Id = '1c-syntax-checker-mcp';  Port = $base + 2 },
+    @{ Id = '1C-docs-mcp';            Port = $docsPort },
+    @{ Id = '1c-templates-mcp';       Port = $base + 4 },
+    @{ Id = '1c-code-check-mcp';      Port = $base + 7 },
+    @{ Id = '1c-ssl-mcp';             Port = $base + 8 }
 )
+if (-not $isRemote) {
+    $servers += @{ Id = '1c-graph-metadata-mcp'; Port = $base + 6 }
+}
 foreach ($s in $servers) {
-    $url = "http://localhost:$($s.Port)/mcp"
+    $url = "http://${mcpHostAddr}:$($s.Port)/mcp"
     try {
         $r = Invoke-WebRequest -Uri $url -Method Get -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
         Write-Host ("{0,-26} {1,-5} HTTP {2}" -f $s.Id, $s.Port, $r.StatusCode)
@@ -127,6 +152,17 @@ For `1c-data-mcp`:
 ### Step 4. Check Docker state
 
 If at least one server is **HTTP_DOWN**:
+
+**Remote Mac** (`MCP_HOST` not localhost): run Docker checks via SSH:
+
+```powershell
+ssh -F $env:USERPROFILE\.ssh\config -o BatchMode=yes mac-mini "docker version --format '{{.Server.Version}}'"
+ssh -F $env:USERPROFILE\.ssh\config mac-mini "docker ps --all --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'"
+```
+
+Use `MCP_SSH_CONFIG` and `MCP_SSH_HOST_ALIAS` from `.dev.env` instead of hardcoded paths.
+
+**Local upstream:**
 
 ```powershell
 docker version --format '{{.Server.Version}}'

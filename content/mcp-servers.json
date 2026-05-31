@@ -4,57 +4,73 @@
       "id": "1c-code-metadata-mcp",
       "description": "1C metadata search, code navigation, forms inspection, XSD schemas and validation",
       "transport": "http",
-      "url": "http://localhost:8000/mcp",
+      "url": "http://{MCP_HOST}:{MCP_PORT}/mcp",
+      "portOffset": 0,
       "connectionId": "1c_metadata_service_001",
-      "required": false
+      "required": false,
+      "remoteV1": true
     },
     {
       "id": "1c-syntax-checker-mcp",
       "description": "BSL syntax validation via BSL Language Server",
       "transport": "http",
-      "url": "http://localhost:8002/mcp",
+      "url": "http://{MCP_HOST}:{MCP_PORT}/mcp",
+      "portOffset": 2,
       "connectionId": "1c_lsp_service_001",
-      "required": false
+      "required": false,
+      "remoteV1": true
     },
     {
       "id": "1C-docs-mcp",
-      "description": "1C platform documentation search (docsearch, docinfo)",
+      "description": "1C platform documentation search (docsearch, docinfo) — platform-scoped, shared across projects",
       "transport": "http",
-      "url": "http://localhost:8003/mcp",
+      "url": "http://{MCP_HOST}:{MCP_DOCS_PORT}/mcp",
+      "platformScoped": true,
+      "idTemplate": "1C-docs-mcp-{PLATFORM_VERSION}",
       "connectionId": "1c_docs_service_001",
-      "required": false
+      "required": false,
+      "remoteV1": true,
+      "localPort": 8003
     },
     {
       "id": "1c-templates-mcp",
       "description": "Code templates library and implementation examples search",
       "transport": "http",
-      "url": "http://localhost:8004/mcp",
+      "url": "http://{MCP_HOST}:{MCP_PORT}/mcp",
+      "portOffset": 4,
       "connectionId": "1c_templates_service_001",
-      "required": false
+      "required": false,
+      "remoteV1": true
     },
     {
       "id": "1c-graph-metadata-mcp",
-      "description": "Graph-based metadata queries and impact analysis (Neo4j / Cypher)",
+      "description": "Graph-based metadata queries and impact analysis (Neo4j / Cypher) — deferred in remote v1",
       "transport": "http",
-      "url": "http://localhost:8006/mcp",
+      "url": "http://{MCP_HOST}:{MCP_PORT}/mcp",
+      "portOffset": 6,
       "connectionId": "1c_graph_metadata_service_001",
-      "required": false
+      "required": false,
+      "remoteV1": false
     },
     {
       "id": "1c-code-check-mcp",
       "description": "1C code review and quality checking (1С:Напарник) — check_1c_code, review_1c_code, ITS docs",
       "transport": "http",
-      "url": "http://localhost:8007/mcp",
+      "url": "http://{MCP_HOST}:{MCP_PORT}/mcp",
+      "portOffset": 7,
       "connectionId": "1c_code_check_service_001",
-      "required": false
+      "required": false,
+      "remoteV1": true
     },
     {
       "id": "1c-ssl-mcp",
       "description": "Standard Subsystems Library (БСП / SSL) function search",
       "transport": "http",
-      "url": "http://localhost:8008/mcp",
+      "url": "http://{MCP_HOST}:{MCP_PORT}/mcp",
+      "portOffset": 8,
       "connectionId": "1c_ssl_service_001",
-      "required": false
+      "required": false,
+      "remoteV1": true
     },
     {
       "id": "1c-data-mcp",

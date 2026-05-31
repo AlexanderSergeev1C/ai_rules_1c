@@ -698,28 +698,124 @@ function Get-InfobasePublishUrlBase {
     return $url
 }
 
+function Get-PlatformVersionFromPath {
+    param([string]$PlatformPath)
+    if ([string]::IsNullOrWhiteSpace($PlatformPath)) { return '' }
+    $name = Split-Path $PlatformPath -Leaf
+    if ($name -match '^(\d+\.\d+\.\d+(?:\.\d+)?)') { return $Matches[1] }
+    return ''
+}
+
+function Test-RemoteMcpMode {
+    param([string]$McpHost)
+    if ([string]::IsNullOrWhiteSpace($McpHost)) { return $false }
+    $h = $McpHost.Trim().ToLowerInvariant()
+    return ($h -ne 'localhost' -and $h -ne '127.0.0.1')
+}
+
 function Resolve-McpServerPlaceholders {
-    # Substitutes {INFOBASE_PUBLISH_URL} in the `url` field of every server
-    # entry that contains it. Mutates the input collection. Returns the list
-    # of server ids whose placeholder could not be resolved because
-    # INFOBASE_PUBLISH_URL was empty / `.dev.env` was missing — the caller
-    # uses this to warn the user.
+    # Substitutes {INFOBASE_PUBLISH_URL}, {MCP_HOST}, {MCP_PORT}, {MCP_DOCS_PORT}
+    # in server URLs and applies idTemplate for platform-scoped docs MCP.
+    # When MCP_HOST points to a remote Mac (not localhost), servers with
+    # remoteV1=false (graph metadata) are excluded from the rendered config.
+    # Mutates matching server objects. Returns server ids whose
+    # {INFOBASE_PUBLISH_URL} could not be resolved.
     param(
         [array]$Servers,
-        [string]$InfobaseBase
+        [string]$InfobaseBase,
+        [string]$Root
     )
     $unresolved = @()
-    foreach ($s in $Servers) {
-        if (-not $s.url) { continue }
-        if ($s.url -notmatch '\{INFOBASE_PUBLISH_URL\}') { continue }
-        if ($InfobaseBase) {
-            $s.url = $s.url.Replace('{INFOBASE_PUBLISH_URL}', $InfobaseBase)
-        }
-        else {
-            $unresolved += $s.id
+    $envPath = Join-Path $Root $script:DevEnvFileName
+    $keys = Read-DevEnvKeys -Path $envPath
+
+    $rawHost = if ($keys.Contains('MCP_HOST')) { [string]$keys['MCP_HOST'] } else { '' }
+    $isRemote = Test-RemoteMcpMode -McpHost $rawHost
+    $mcpHost = if ($rawHost.Trim()) { $rawHost.Trim() } else { 'localhost' }
+    if (-not $isRemote -and [string]::IsNullOrWhiteSpace($rawHost)) {
+        Write-Warn '  MCP config: MCP_HOST не задан в .dev.env — используется localhost (upstream-режим).'
+    }
+
+    $portBaseStr = if ($keys.Contains('MCP_PORT_BASE')) { [string]$keys['MCP_PORT_BASE'] } else { '' }
+    $portBase = 8000
+    if ($portBaseStr -match '^\d+$') {
+        $portBase = [int]$portBaseStr
+    }
+    elseif ($isRemote) {
+        Write-Warn '  MCP config: MCP_PORT_BASE пуст при remote-режиме — запустите tools/allocate-mcp-ports.ps1 или /installmcp до использования project-scoped MCP.'
+    }
+
+    $docsPortStr = if ($keys.Contains('MCP_DOCS_PORT')) { [string]$keys['MCP_DOCS_PORT'] } else { '' }
+    $docsPort = if ($docsPortStr -match '^\d+$') { [int]$docsPortStr } else { if ($isRemote) { 0 } else { 8003 } }
+    if ($isRemote -and $docsPort -eq 0) {
+        Write-Warn '  MCP config: MCP_DOCS_PORT пуст — HelpSearchServer ещё не установлен на Mac (/installmcp).'
+    }
+
+    $platformVersion = if ($keys.Contains('PLATFORM_VERSION')) { [string]$keys['PLATFORM_VERSION'] } else { '' }
+    if ([string]::IsNullOrWhiteSpace($platformVersion) -and $keys.Contains('PLATFORM_PATH')) {
+        $platformVersion = Get-PlatformVersionFromPath -PlatformPath ([string]$keys['PLATFORM_PATH'])
+    }
+
+    $toProcess = @($Servers)
+    if ($isRemote) {
+        $toProcess = @($Servers | Where-Object {
+            $include = $true
+            if ($_.PSObject.Properties.Match('remoteV1').Count -gt 0) {
+                $include = [bool]$_.remoteV1
+            }
+            return $include
+        })
+        if ($toProcess.Count -lt $Servers.Count) {
+            Write-Info '  MCP config: remote v1 — 1c-graph-metadata-mcp исключён (deferred v2).'
         }
     }
-    return , $unresolved
+
+    foreach ($s in $toProcess) {
+        if ($s.idTemplate -and -not [string]::IsNullOrWhiteSpace($platformVersion)) {
+            $s.id = [string]$s.idTemplate -replace '\{PLATFORM_VERSION\}', $platformVersion
+        }
+
+        if (-not $s.url) { continue }
+        $url = [string]$s.url
+
+        if ($url -match '\{MCP_HOST\}') {
+            $url = $url.Replace('{MCP_HOST}', $mcpHost)
+        }
+
+        if ($url -match '\{MCP_DOCS_PORT\}') {
+            $effectiveDocsPort = if ($isRemote) {
+                if ($docsPort -gt 0) { $docsPort } else { '{MCP_DOCS_PORT}' }
+            }
+            else {
+                $localPort = 8003
+                if ($s.PSObject.Properties.Match('localPort').Count -gt 0) { $localPort = [int]$s.localPort }
+                $localPort
+            }
+            $url = $url.Replace('{MCP_DOCS_PORT}', [string]$effectiveDocsPort)
+        }
+
+        if ($url -match '\{MCP_PORT\}') {
+            $offset = 0
+            if ($s.PSObject.Properties.Match('portOffset').Count -gt 0) { $offset = [int]$s.portOffset }
+            $url = $url.Replace('{MCP_PORT}', [string]($portBase + $offset))
+        }
+
+        if ($url -match '\{INFOBASE_PUBLISH_URL\}') {
+            if ($InfobaseBase) {
+                $url = $url.Replace('{INFOBASE_PUBLISH_URL}', $InfobaseBase)
+            }
+            else {
+                $unresolved += $s.id
+            }
+        }
+
+        $s.url = $url
+    }
+
+    return @{
+        Unresolved = @($unresolved)
+        Servers    = @($toProcess)
+    }
 }
 
 function Test-McpHttpEndpoint {
@@ -1939,7 +2035,9 @@ function Invoke-McpPhase {
     # keep the literal placeholder in the rendered config — the user sees a
     # clear TODO marker and a warning telling them what to fill in.
     $infobaseBase = Get-InfobasePublishUrlBase -Root $Root
-    $unresolved = Resolve-McpServerPlaceholders -Servers $servers -InfobaseBase $infobaseBase
+    $mcpResolved = Resolve-McpServerPlaceholders -Servers $servers -InfobaseBase $infobaseBase -Root $Root
+    $servers = $mcpResolved.Servers
+    $unresolved = $mcpResolved.Unresolved
     if ($unresolved.Count -gt 0) {
         Write-Warn ("  MCP config: следующие серверы используют плейсхолдер {INFOBASE_PUBLISH_URL}, но INFOBASE_PUBLISH_URL в .dev.env пуст: " + ($unresolved -join ', ') + '.')
         Write-Warn '  Заполните INFOBASE_PUBLISH_URL в .dev.env (URL веб-публикации ИБ, напр. http://localhost/<infobase_name>/ru/) и запустите установщик повторно — MCP-конфиг будет перерендерен с подставленным URL.'
