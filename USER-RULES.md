@@ -5,7 +5,7 @@ Environment invariants for this fork (two-machine workflow). These extend `AGENT
 ## Two-machine layout
 
 - **Windows PC** — 1C platform, configuration export (`DumpConfigToFiles`), Cursor, AI agent.
-- **Mac mini** (`MCP_HOST` in `.dev.env`, default `192.168.1.122`) — OrbStack (Docker, **arm64** images only), MCP server containers, long-running RAG indexing.
+- **Mac mini** (`MCP_HOST` in `.dev.env`, default `mac-mini-al.local`) — OrbStack (Docker, **arm64** images only), MCP server containers, long-running RAG indexing.
 - **SSH** — always via `MCP_SSH_CONFIG` + `MCP_SSH_HOST_ALIAS` (e.g. `mac-mini`); never hardcode `user@ip`.
 
 ## Sync conventions

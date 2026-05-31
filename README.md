@@ -50,7 +50,7 @@ git clone https://github.com/comol/ai_rules_1c.git $env:TEMP\1c-rules
 
 1. Выгрузите конфигурацию в файлы (`/loadfrom1cbase` или Конфигуратор).
 2. Сформируйте отчёт по конфигурации в соседнюю папку `{ИмяПроекта}_report/`.
-3. Установите правила из форка (`AGENT-INSTALL.md`) — `.dev.env` получит секцию **Remote MCP host** с дефолтами (`MCP_HOST=192.168.1.122`, SSH alias `mac-mini`).
+3. Установите правила из форка (`AGENT-INSTALL.md`) — `.dev.env` получит секцию **Remote MCP host** с дефолтами (`MCP_HOST=mac-mini-al.local`, SSH alias `mac-mini`).
 4. `/synctomcp` — копирует выгрузку в `code-{ProjectName}/` и отчёт в `metadata-{ProjectName}/` на Mac через SSH config.
 5. `/installmcp` — поднимает project-scoped MCP на Mac (образы **`:arm64`**, per-project port pool `8000–8009`, `8010–8019`, …); HelpSearchServer — **по версии платформы** с reuse; **без GraphMetadata/Neo4j в v1**.
 6. Cursor на Windows подключается к `http://{MCP_HOST}:<port>/mcp`; проверка — `/checkmcp`.
