@@ -1,4 +1,4 @@
-﻿# skd-edit v1.18 — Atomic 1C DCS editor
+﻿# skd-edit v1.24 — Atomic 1C DCS editor
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 param(
 	[Parameter(Mandatory)]
@@ -28,6 +28,10 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# Dirty flag — set to $true by every successful mutation. If still $false at save time,
+# the file is left untouched (NO-OP operations like [WARN] not found don't rewrite).
+$script:Dirty = $false
+
 # --- 1. Resolve path ---
 
 if (-not $TemplatePath.EndsWith(".xml")) {
@@ -46,7 +50,7 @@ $resolvedPath = (Resolve-Path $TemplatePath).Path
 
 function Esc-Xml {
 	param([string]$s)
-	return $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;').Replace('"','&quot;')
+	return $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
 }
 
 function Resolve-QueryValue {
@@ -179,6 +183,8 @@ function Read-FieldProperties($fieldEl) {
 	$props = @{
 		dataPath = ""; field = ""; title = ""; type = ""
 		roles = @(); restrict = @()
+		_rawTitle = $null
+		_unknownChildren = @()
 	}
 
 	foreach ($ch in $fieldEl.ChildNodes) {
@@ -187,19 +193,35 @@ function Read-FieldProperties($fieldEl) {
 			"dataPath" { $props.dataPath = $ch.InnerText.Trim() }
 			"field" { $props.field = $ch.InnerText.Trim() }
 			"title" {
-				# Extract text from LocalStringType
+				# Preserve full multi-lang title OuterXml — used to keep en/uk/etc.
+				# siblings when shorthand overrides only the ru content. Strip xmlns
+				# redeclarations that OuterXml adds for sub-elements.
+				$raw = $ch.OuterXml
+				$raw = [regex]::Replace($raw, ' xmlns(?::\w+)?="[^"]*"', '')
+				$props._rawTitle = $raw
+				# Also extract ru content as plain string (backward compat — used by
+				# external consumers reading $existing.title).
 				foreach ($item in $ch.ChildNodes) {
 					if ($item.NodeType -eq 'Element' -and $item.LocalName -eq 'item') {
+						$lang = $null; $content = $null
 						foreach ($gc in $item.ChildNodes) {
-							if ($gc.NodeType -eq 'Element' -and $gc.LocalName -eq 'content') {
-								$props.title = $gc.InnerText.Trim()
-							}
+							if ($gc.NodeType -eq 'Element' -and $gc.LocalName -eq 'lang') { $lang = $gc.InnerText.Trim() }
+							if ($gc.NodeType -eq 'Element' -and $gc.LocalName -eq 'content') { $content = $gc.InnerText.Trim() }
 						}
+						if ($lang -eq 'ru' -and $null -ne $content) { $props.title = $content }
 					}
 				}
 			}
 			"valueType" {
-				# Read type info — store the raw element for now, we'll use type from parsed if overridden
+				# Preserve the entire <valueType> OuterXml so rebuild can re-emit qualifiers
+				# (StringQualifiers, NumberQualifiers, DateQualifiers, etc.) that would
+				# otherwise be lost. Also extract Type string for type-override shorthand.
+				$raw = $ch.OuterXml
+				# .NET OuterXml re-declares xmlns on every element where the prefix is in
+				# scope (because the fragment is treated as standalone). Strip these since
+				# the parent context at insertion point already provides them.
+				$raw = [regex]::Replace($raw, ' xmlns(?::\w+)?="[^"]*"', '')
+				$props["_rawValueType"] = $raw
 				$typeEl = $null
 				foreach ($gc in $ch.ChildNodes) {
 					if ($gc.NodeType -eq 'Element' -and $gc.LocalName -eq 'Type') {
@@ -229,6 +251,13 @@ function Read-FieldProperties($fieldEl) {
 						if ($mapped) { $props.restrict += $mapped }
 					}
 				}
+			}
+			default {
+				# Defense in depth: preserve OuterXml of unknown children so rebuild
+				# doesn't silently drop them (custom <editFormat>, <appearance>, etc.).
+				$raw = $ch.OuterXml
+				$raw = [regex]::Replace($raw, ' xmlns(?::\w+)?="[^"]*"', '')
+				$props._unknownChildren += $raw
 			}
 		}
 	}
@@ -308,7 +337,7 @@ function Parse-CalcShorthand {
 function Parse-ParamShorthand {
 	param([string]$s)
 
-	$result = @{ name = ""; type = ""; value = $null; autoDates = $false; title = $null; hidden = $false; always = $false; availableValues = @() }
+	$result = @{ name = ""; type = ""; value = $null; autoDates = $false; title = $null; hidden = $false; always = $false; availableValues = @(); valueListAllowed = $false }
 
 	# Extract availableValue=... (must be before main parse — captures to end of string)
 	if ($s -match '\s*availableValue=(.+)$') {
@@ -319,6 +348,11 @@ function Parse-ParamShorthand {
 	if ($s -match '@autoDates') {
 		$result.autoDates = $true
 		$s = $s -replace '\s*@autoDates', ''
+	}
+
+	if ($s -match '@valueList\b') {
+		$result.valueListAllowed = $true
+		$s = $s -replace '\s*@valueList\b', ''
 	}
 
 	if ($s -match '@hidden\b') {
@@ -337,11 +371,14 @@ function Parse-ParamShorthand {
 		$s = ($s -replace '\s*\[[^\]]*\]\s*', ' ').Trim()
 	}
 
-	if ($s -match '^([^:]+):\s*(\S+)(\s*=\s*(.+))?$') {
+	# Split "Name: Type = Value" — RHS may be empty (`= ` / `=`) → treated as empty-value sentinel
+	if ($s -match '^([^:]+):\s*(\S+)(\s*=\s*(.*))?$') {
 		$result.name = $Matches[1].Trim()
 		$result.type = Resolve-TypeStr ($Matches[2].Trim())
-		if ($Matches[4]) {
-			$result.value = $Matches[4].Trim()
+		$hasEq = $null -ne $Matches[3]
+		$rhs = $Matches[4]
+		if ($hasEq) {
+			$result.value = if ($rhs) { $rhs.Trim() } else { "" }
 		}
 	} else {
 		$result.name = $s.Trim()
@@ -461,17 +498,16 @@ function Parse-DataParamShorthand {
 
 	$s = $s.Trim()
 
-	if ($s -match '^([^=]+)=\s*(.+)$') {
+	if ($s -match '^([^=]+)=\s*(.*)$') {
 		$result.parameter = $Matches[1].Trim()
 		$valStr = $Matches[2].Trim()
 
 		$periodVariants = @("Custom","Today","ThisWeek","ThisTenDays","ThisMonth","ThisQuarter","ThisHalfYear","ThisYear","FromBeginningOfThisWeek","FromBeginningOfThisTenDays","FromBeginningOfThisMonth","FromBeginningOfThisQuarter","FromBeginningOfThisHalfYear","FromBeginningOfThisYear","LastWeek","LastTenDays","LastMonth","LastQuarter","LastHalfYear","LastYear","NextDay","NextWeek","NextTenDays","NextMonth","NextQuarter","NextHalfYear","NextYear","TillEndOfThisWeek","TillEndOfThisTenDays","TillEndOfThisMonth","TillEndOfThisQuarter","TillEndOfThisHalfYear","TillEndOfThisYear")
-		if ($periodVariants -contains $valStr) {
+		# Empty / sentinel — record as "" so caller emits xsi:nil
+		if ($valStr -eq "" -or $valStr -eq "_" -or $valStr.ToLowerInvariant() -eq "null") {
+			$result.value = ""
+		} elseif ($periodVariants -contains $valStr) {
 			$result.value = @{ variant = $valStr }
-		} elseif ($valStr -match '^\d{4}-\d{2}-\d{2}T') {
-			$result.value = $valStr
-		} elseif ($valStr -eq "true" -or $valStr -eq "false") {
-			$result.value = $valStr
 		} else {
 			$result.value = $valStr
 		}
@@ -715,69 +751,135 @@ function Parse-AvailableValueList {
 # --- 4. Build-* functions (XML fragment generators) ---
 
 function Build-ValueTypeXml {
-	param([string]$typeStr, [string]$indent)
+	param($typeStr, [string]$indent)
 
 	if (-not $typeStr) { return "" }
-	$typeStr = Resolve-TypeStr $typeStr
+
+	# Composite: array of types — concatenate per-type fragments
+	if ($typeStr -is [array] -or $typeStr -is [System.Collections.IList]) {
+		$parts = @()
+		foreach ($t in $typeStr) {
+			$p = Build-ValueTypeXml -typeStr "$t" -indent $indent
+			if ($p) { $parts += $p }
+		}
+		return $parts -join "`n"
+	}
+
+	$typeStr = Resolve-TypeStr "$typeStr"
 	$lines = @()
 
 	if ($typeStr -eq "boolean") {
 		$lines += "$indent<v8:Type>xs:boolean</v8:Type>"
-		return $lines -join "`r`n"
+		return $lines -join "`n"
 	}
 
-	if ($typeStr -match '^string(\((\d+)\))?$') {
+	# string, string(N), string(N,fix) — fix → AllowedLength=Fixed
+	if ($typeStr -match '^string(\((\d+)(,(fix|fixed))?\))?$') {
 		$len = if ($Matches[2]) { $Matches[2] } else { "0" }
+		$al  = if ($Matches[4]) { "Fixed" } else { "Variable" }
 		$lines += "$indent<v8:Type>xs:string</v8:Type>"
 		$lines += "$indent<v8:StringQualifiers>"
 		$lines += "$indent`t<v8:Length>$len</v8:Length>"
-		$lines += "$indent`t<v8:AllowedLength>Variable</v8:AllowedLength>"
+		$lines += "$indent`t<v8:AllowedLength>$al</v8:AllowedLength>"
 		$lines += "$indent</v8:StringQualifiers>"
-		return $lines -join "`r`n"
+		return $lines -join "`n"
 	}
 
-	if ($typeStr -match '^decimal\((\d+),(\d+)(,nonneg)?\)$') {
-		$digits = $Matches[1]
-		$fraction = $Matches[2]
-		$sign = if ($Matches[3]) { "Nonnegative" } else { "Any" }
+	# decimal forms — bare decimal = money 10,2; decimal(N) = integer N,0
+	if ($typeStr -match '^decimal(\((\d+)(,(\d+))?(,nonneg)?\))?$') {
+		if (-not $Matches[1]) {
+			$digits = "10"; $fraction = "2"; $sign = "Any"
+		} else {
+			$digits = $Matches[2]
+			$fraction = if ($Matches[4]) { $Matches[4] } else { "0" }
+			$sign = if ($Matches[5]) { "Nonnegative" } else { "Any" }
+		}
 		$lines += "$indent<v8:Type>xs:decimal</v8:Type>"
 		$lines += "$indent<v8:NumberQualifiers>"
 		$lines += "$indent`t<v8:Digits>$digits</v8:Digits>"
 		$lines += "$indent`t<v8:FractionDigits>$fraction</v8:FractionDigits>"
 		$lines += "$indent`t<v8:AllowedSign>$sign</v8:AllowedSign>"
 		$lines += "$indent</v8:NumberQualifiers>"
-		return $lines -join "`r`n"
+		return $lines -join "`n"
 	}
 
-	if ($typeStr -match '^(date|dateTime)$') {
+	# date / dateTime / time — all xs:dateTime, differ only in DateFractions
+	if ($typeStr -match '^(date|dateTime|time)$') {
 		$fractions = switch ($typeStr) {
 			"date"     { "Date" }
 			"dateTime" { "DateTime" }
+			"time"     { "Time" }
 		}
 		$lines += "$indent<v8:Type>xs:dateTime</v8:Type>"
 		$lines += "$indent<v8:DateQualifiers>"
 		$lines += "$indent`t<v8:DateFractions>$fractions</v8:DateFractions>"
 		$lines += "$indent</v8:DateQualifiers>"
-		return $lines -join "`r`n"
+		return $lines -join "`n"
 	}
 
 	if ($typeStr -eq "StandardPeriod") {
 		$lines += "$indent<v8:Type>v8:StandardPeriod</v8:Type>"
-		return $lines -join "`r`n"
+		return $lines -join "`n"
 	}
 
 	if ($typeStr -match '^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef)\.') {
 		$lines += "$indent<v8:Type xmlns:d5p1=`"http://v8.1c.ru/8.1/data/enterprise/current-config`">d5p1:$(Esc-Xml $typeStr)</v8:Type>"
-		return $lines -join "`r`n"
+		return $lines -join "`n"
 	}
 
 	if ($typeStr.Contains('.')) {
 		$lines += "$indent<v8:Type xmlns:d5p1=`"http://v8.1c.ru/8.1/data/enterprise/current-config`">d5p1:$(Esc-Xml $typeStr)</v8:Type>"
-		return $lines -join "`r`n"
+		return $lines -join "`n"
 	}
 
 	$lines += "$indent<v8:Type>$(Esc-Xml $typeStr)</v8:Type>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
+}
+
+# Sentinel-normalized empty check — null / "" / "_" / "null" (case-insensitive).
+function Test-EmptyValue {
+	param($v)
+	if ($null -eq $v) { return $true }
+	$s = "$v".Trim()
+	if ($s -eq "") { return $true }
+	if ($s -eq "_") { return $true }
+	if ($s.ToLowerInvariant() -eq "null") { return $true }
+	return $false
+}
+
+# Returns XML fragment string for a type-aware empty <value>.
+# Empty + valueListAllowed → omit entirely (returns $null).
+# tagPrefix used for dcscor: in data parameters.
+function Build-EmptyValueXml {
+	param([string]$type, [string]$indent, [string]$tagPrefix = "", [string]$tagName = "value", [bool]$valueListAllowed = $false)
+	if ($valueListAllowed) { return $null }
+	$t = if ($null -eq $type) { "" } else { "$type" }
+	# Strip well-known XML schema prefixes so callers can pass raw <v8:Type> text
+	$t = $t -replace '^xs:', '' -replace '^v8:', '' -replace '^d\d+p\d+:', ''
+	$pf = $tagPrefix
+	$tn = $tagName
+	$lines = @()
+	if ($t -eq "") {
+		$lines += "$indent<${pf}${tn} xsi:nil=`"true`"/>"
+	} elseif ($t -eq "StandardPeriod") {
+		$lines += "$indent<${pf}${tn} xsi:type=`"v8:StandardPeriod`">"
+		$lines += "$indent`t<v8:variant xsi:type=`"v8:StandardPeriodVariant`">Custom</v8:variant>"
+		$lines += "$indent`t<v8:startDate>0001-01-01T00:00:00</v8:startDate>"
+		$lines += "$indent`t<v8:endDate>0001-01-01T00:00:00</v8:endDate>"
+		$lines += "$indent</${pf}${tn}>"
+	} elseif ($t -match '^string') {
+		$lines += "$indent<${pf}${tn} xsi:type=`"xs:string`"/>"
+	} elseif ($t -match '^(date|time)') {
+		$lines += "$indent<${pf}${tn} xsi:type=`"xs:dateTime`">0001-01-01T00:00:00</${pf}${tn}>"
+	} elseif ($t -match '^decimal') {
+		$lines += "$indent<${pf}${tn} xsi:type=`"xs:decimal`">0</${pf}${tn}>"
+	} elseif ($t -eq "boolean") {
+		$lines += "$indent<${pf}${tn} xsi:type=`"xs:boolean`">false</${pf}${tn}>"
+	} else {
+		# Ref types or unknown — safe nil
+		$lines += "$indent<${pf}${tn} xsi:nil=`"true`"/>"
+	}
+	return $lines -join "`n"
 }
 
 function Build-MLTextXml {
@@ -789,7 +891,29 @@ function Build-MLTextXml {
 	$lines += "$indent`t`t<v8:content>$(Esc-Xml $text)</v8:content>"
 	$lines += "$indent`t</v8:item>"
 	$lines += "$indent</$tag>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
+}
+
+# Patches the ru <v8:content> within an existing multi-lang title OuterXml, preserving
+# en/uk/etc. siblings. Used when modify-* operates with a title-override shorthand on a
+# field/parameter that already has multi-language titles (typical in ERP/БП/ЗУП).
+# If no ru item exists, one is prepended before the first existing item.
+function Patch-MLTextRu {
+	param([string]$rawOuterXml, [string]$newRuText, [string]$indent)
+	$escaped = Esc-Xml $newRuText
+	$ruItemPat = '(<v8:item>\s*<v8:lang>ru</v8:lang>\s*<v8:content>)[^<]*(</v8:content>\s*</v8:item>)'
+	if ([regex]::IsMatch($rawOuterXml, $ruItemPat)) {
+		return [regex]::Replace($rawOuterXml, $ruItemPat, { param($m) $m.Groups[1].Value + $escaped + $m.Groups[2].Value })
+	}
+	# No ru item — prepend one inside the title element, before first <v8:item>.
+	$prep = "$indent`t<v8:item>`n$indent`t`t<v8:lang>ru</v8:lang>`n$indent`t`t<v8:content>$escaped</v8:content>`n$indent`t</v8:item>"
+	if ($rawOuterXml -match '<v8:item>') {
+		$re = New-Object System.Text.RegularExpressions.Regex('(\s*)<v8:item>')
+		return $re.Replace($rawOuterXml, "`n$prep`$1<v8:item>", 1)
+	}
+	# Empty title — inject after opening tag.
+	$re2 = New-Object System.Text.RegularExpressions.Regex('(<(?:\w+:)?title[^>]*>)')
+	return $re2.Replace($rawOuterXml, "`$1`n$prep`n$indent", 1)
 }
 
 function Build-RoleXml {
@@ -808,7 +932,7 @@ function Build-RoleXml {
 		}
 	}
 	$lines += "$indent</role>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-RestrictionXml {
@@ -830,7 +954,7 @@ function Build-RestrictionXml {
 		}
 	}
 	$lines += "$indent</useRestriction>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-FieldFragment {
@@ -842,7 +966,16 @@ function Build-FieldFragment {
 	$lines += "$i`t<dataPath>$(Esc-Xml $parsed.dataPath)</dataPath>"
 	$lines += "$i`t<field>$(Esc-Xml $parsed.field)</field>"
 
-	if ($parsed.title) {
+	# Title: prefer raw multi-lang title (preserves en/uk/etc.). When shorthand provides
+	# a new ru text, patch ru content inside the raw title; otherwise emit raw as-is.
+	# When no raw title exists, fall back to ru-only build from shorthand.
+	if ($parsed._rawTitle) {
+		if ($parsed.title -and $parsed.title -ne $parsed._existingTitleRu) {
+			$lines += "$i`t" + (Patch-MLTextRu $parsed._rawTitle $parsed.title "$i`t")
+		} else {
+			$lines += "$i`t" + $parsed._rawTitle
+		}
+	} elseif ($parsed.title) {
 		$lines += (Build-MLTextXml -tag "title" -text $parsed.title -indent "$i`t")
 	}
 
@@ -853,14 +986,26 @@ function Build-FieldFragment {
 	$roleXml = Build-RoleXml -roles $parsed.roles -indent "$i`t"
 	if ($roleXml) { $lines += $roleXml }
 
-	if ($parsed.type) {
+	if ($parsed.rawValueType) {
+		# Preserve original <valueType> verbatim — keeps qualifiers (StringQualifiers,
+		# NumberQualifiers, DateQualifiers, …) that aren't expressible via shorthand.
+		$lines += "$i`t" + $parsed.rawValueType
+	} elseif ($parsed.type) {
 		$lines += "$i`t<valueType>"
 		$lines += (Build-ValueTypeXml -typeStr $parsed.type -indent "$i`t`t")
 		$lines += "$i`t</valueType>"
 	}
 
+	# Defense in depth: re-emit OuterXml of unknown children (e.g. <editFormat>,
+	# <appearance>, custom extensions) that Read-FieldProperties captured.
+	if ($parsed._unknownChildren) {
+		foreach ($raw in $parsed._unknownChildren) {
+			$lines += "$i`t" + $raw
+		}
+	}
+
 	$lines += "$i</field>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-TotalFragment {
@@ -872,7 +1017,7 @@ function Build-TotalFragment {
 	$lines += "$i`t<dataPath>$(Esc-Xml $parsed.dataPath)</dataPath>"
 	$lines += "$i`t<expression>$(Esc-Xml $parsed.expression)</expression>"
 	$lines += "$i</totalField>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-CalcFieldFragment {
@@ -899,7 +1044,7 @@ function Build-CalcFieldFragment {
 	}
 
 	$lines += "$i</calculatedField>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-ParamValueXml {
@@ -950,8 +1095,13 @@ function Build-AvailableValueFragment {
 
 	$lines = @()
 	$lines += "$indent<availableValue>"
-	$valueLines = Build-ParamValueXml -type $declaredType -value $item.value -indent "$indent`t"
-	foreach ($vl in $valueLines) { $lines += $vl }
+	if (Test-EmptyValue $item.value) {
+		$emptyXml = Build-EmptyValueXml -type $declaredType -indent "$indent`t" -tagPrefix "" -tagName "value" -valueListAllowed $false
+		if ($emptyXml) { $lines += $emptyXml }
+	} else {
+		$valueLines = Build-ParamValueXml -type $declaredType -value $item.value -indent "$indent`t"
+		foreach ($vl in $valueLines) { $lines += $vl }
+	}
 	if ($item.presentation) {
 		$lines += "$indent`t<presentation xsi:type=`"v8:LocalStringType`">"
 		$lines += "$indent`t`t<v8:item>"
@@ -984,14 +1134,24 @@ function Build-ParamFragment {
 		$lines += "$i`t</valueType>"
 	}
 
+	$vla = [bool]$parsed.valueListAllowed
 	if ($null -ne $parsed.value) {
-		$valueLines = Build-ParamValueXml -type $parsed.type -value $parsed.value -indent "$i`t"
-		foreach ($vl in $valueLines) { $lines += $vl }
+		if (Test-EmptyValue $parsed.value) {
+			$emptyXml = Build-EmptyValueXml -type $parsed.type -indent "$i`t" -tagPrefix "" -tagName "value" -valueListAllowed $vla
+			if ($emptyXml) { $lines += $emptyXml }
+		} else {
+			$valueLines = Build-ParamValueXml -type $parsed.type -value $parsed.value -indent "$i`t"
+			foreach ($vl in $valueLines) { $lines += $vl }
+		}
 	}
 
 	if ($parsed.hidden) {
 		$lines += "$i`t<useRestriction>true</useRestriction>"
 		$lines += "$i`t<availableAsField>false</availableAsField>"
+	}
+
+	if ($vla) {
+		$lines += "$i`t<valueListAllowed>true</valueListAllowed>"
 	}
 
 	if ($parsed.availableValues -and $parsed.availableValues.Count -gt 0) {
@@ -1006,7 +1166,7 @@ function Build-ParamFragment {
 	}
 
 	$lines += "$i</parameter>"
-	$fragments += ($lines -join "`r`n")
+	$fragments += ($lines -join "`n")
 
 	if ($parsed.autoDates) {
 		$paramName = $parsed.name
@@ -1023,7 +1183,7 @@ function Build-ParamFragment {
 		$bLines += "$i`t<useRestriction>true</useRestriction>"
 		$bLines += "$i`t<expression>$(Esc-Xml "&$paramName.ДатаНачала")</expression>"
 		$bLines += "$i</parameter>"
-		$fragments += ($bLines -join "`r`n")
+		$fragments += ($bLines -join "`n")
 
 		$eLines = @()
 		$eLines += "$i<parameter>"
@@ -1036,7 +1196,7 @@ function Build-ParamFragment {
 		$eLines += "$i`t<useRestriction>true</useRestriction>"
 		$eLines += "$i`t<expression>$(Esc-Xml "&$paramName.ДатаОкончания")</expression>"
 		$eLines += "$i</parameter>"
-		$fragments += ($eLines -join "`r`n")
+		$fragments += ($eLines -join "`n")
 	}
 
 	return ,$fragments
@@ -1071,7 +1231,7 @@ function Build-FilterItemFragment {
 	}
 
 	$lines += "$i</dcsset:item>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-SelectionItemFragment {
@@ -1112,7 +1272,7 @@ function Build-SelectionItemFragment {
 		$lines += "$i`t<dcsset:field>$(Esc-Xml $fieldName)</dcsset:field>"
 		$lines += "$i</dcsset:item>"
 	}
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-DataParamFragment {
@@ -1135,6 +1295,8 @@ function Build-DataParamFragment {
 			$lines += "$i`t`t<v8:startDate>0001-01-01T00:00:00</v8:startDate>"
 			$lines += "$i`t`t<v8:endDate>0001-01-01T00:00:00</v8:endDate>"
 			$lines += "$i`t</dcscor:value>"
+		} elseif (Test-EmptyValue $parsed.value) {
+			$lines += "$i`t<dcscor:value xsi:nil=`"true`"/>"
 		} elseif ("$($parsed.value)" -match '^\d{4}-\d{2}-\d{2}T') {
 			$lines += "$i`t<dcscor:value xsi:type=`"xs:dateTime`">$(Esc-Xml "$($parsed.value)")</dcscor:value>"
 		} elseif ("$($parsed.value)" -eq "true" -or "$($parsed.value)" -eq "false") {
@@ -1154,7 +1316,7 @@ function Build-DataParamFragment {
 	}
 
 	$lines += "$i</dcscor:item>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-OrderItemFragment {
@@ -1170,7 +1332,7 @@ function Build-OrderItemFragment {
 		$lines += "$i`t<dcsset:orderType>$($parsed.direction)</dcsset:orderType>"
 		$lines += "$i</dcsset:item>"
 	}
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-DataSetLinkFragment {
@@ -1187,7 +1349,7 @@ function Build-DataSetLinkFragment {
 		$lines += "$i`t<parameter>$(Esc-Xml $parsed.parameter)</parameter>"
 	}
 	$lines += "$i</dataSetLink>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-DataSetQueryFragment {
@@ -1200,7 +1362,7 @@ function Build-DataSetQueryFragment {
 	$lines += "$i`t<dataSource>$(Esc-Xml $parsed.dataSource)</dataSource>"
 	$lines += "$i`t<query>$(Esc-Xml $parsed.query)</query>"
 	$lines += "$i</dataSet>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-VariantFragment {
@@ -1226,7 +1388,7 @@ function Build-VariantFragment {
 	$lines += "$i`t`t</dcsset:item>"
 	$lines += "$i`t</dcsset:settings>"
 	$lines += "$i</settingsVariant>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Emit-FilterComparison {
@@ -1308,7 +1470,7 @@ function Build-ConditionalAppearanceItemFragment {
 	$lines += "$i`t</dcsset:appearance>"
 
 	$lines += "$i</dcsset:item>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-StructureItemFragment {
@@ -1360,7 +1522,7 @@ function Build-StructureItemFragment {
 	}
 
 	$lines += "$i</dcsset:item>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 function Build-OutputParamFragment {
@@ -1388,7 +1550,7 @@ function Build-OutputParamFragment {
 	}
 
 	$lines += "$i</dcscor:item>"
-	return $lines -join "`r`n"
+	return $lines -join "`n"
 }
 
 # --- 5. XML helpers ---
@@ -1433,7 +1595,9 @@ function Get-ChildIndent($container) {
 }
 
 function Insert-BeforeElement($container, $newNode, $refNode, $childIndent) {
-	$ws = $xmlDoc.CreateWhitespace("`r`n$childIndent")
+	# LF line endings — 1С DCS files use LF consistently; CRLF causes idempotency
+	# leaks when modify-* removes one whitespace and inserts a different-style one.
+	$ws = $xmlDoc.CreateWhitespace("`n$childIndent")
 	if ($refNode) {
 		$container.InsertBefore($ws, $refNode) | Out-Null
 		$container.InsertBefore($newNode, $ws) | Out-Null
@@ -1446,7 +1610,7 @@ function Insert-BeforeElement($container, $newNode, $refNode, $childIndent) {
 			$container.AppendChild($ws) | Out-Null
 			$container.AppendChild($newNode) | Out-Null
 			$parentIndent = if ($childIndent.Length -gt 1) { $childIndent.Substring(0, $childIndent.Length - 1) } else { "" }
-			$closeWs = $xmlDoc.CreateWhitespace("`r`n$parentIndent")
+			$closeWs = $xmlDoc.CreateWhitespace("`n$parentIndent")
 			$container.AppendChild($closeWs) | Out-Null
 		}
 	}
@@ -1563,6 +1727,131 @@ function Set-OrCreateChildElementWithAttr($parent, [string]$localName, [string]$
 			Insert-BeforeElement $parent $node $null $indent
 		}
 	}
+}
+
+function Get-AllDataSets {
+	$schNs = "http://v8.1c.ru/8.1/data-composition-system/schema"
+	$root = $xmlDoc.DocumentElement
+	$result = @()
+	foreach ($child in $root.ChildNodes) {
+		if ($child.NodeType -eq 'Element' -and $child.LocalName -eq 'dataSet' -and $child.NamespaceURI -eq $schNs) {
+			$result += $child
+		}
+	}
+	return ,$result
+}
+
+function Normalize-LineEndings([string]$s) {
+	if ($null -eq $s) { return $s }
+	return $s.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
+function Escape-Whitespace([string]$s) {
+	$sb = New-Object System.Text.StringBuilder
+	foreach ($c in $s.ToCharArray()) {
+		$code = [int]$c
+		if ($c -eq "`n") { [void]$sb.Append('\n') }
+		elseif ($c -eq "`r") { [void]$sb.Append('\r') }
+		elseif ($c -eq "`t") { [void]$sb.Append('\t') }
+		elseif ($code -lt 32 -or $code -eq 0xA0 -or ($code -ge 0x2000 -and $code -le 0x200F) -or $code -eq 0xFEFF) {
+			[void]$sb.AppendFormat('\u{0:X4}', $code)
+		} else {
+			[void]$sb.Append($c)
+		}
+	}
+	return $sb.ToString()
+}
+
+function Collapse-Whitespace([string]$s) {
+	return ([regex]::Replace($s, "[\s ]+", " ")).Trim()
+}
+
+function Find-LongestPrefixMatch([string]$haystack, [string]$needle) {
+	# Binary search: largest L such that needle.Substring(0, L) is a substring of haystack.
+	# Monotonic — if length L matches at position P, then length L-1 (prefix) also matches at P.
+	if ($needle.Length -eq 0 -or $haystack.Length -eq 0) {
+		return @{ Length = 0; Offset = -1 }
+	}
+	if ($haystack.IndexOf([string]$needle[0]) -lt 0) {
+		return @{ Length = 0; Offset = -1 }
+	}
+	$lo = 1; $hi = $needle.Length
+	$bestLen = 1; $bestOffset = $haystack.IndexOf([string]$needle[0])
+	while ($lo -le $hi) {
+		$mid = [int](($lo + $hi) / 2)
+		$idx = $haystack.IndexOf($needle.Substring(0, $mid))
+		if ($idx -ge 0) { $bestLen = $mid; $bestOffset = $idx; $lo = $mid + 1 }
+		else { $hi = $mid - 1 }
+	}
+	return @{ Length = $bestLen; Offset = $bestOffset }
+}
+
+function Format-PatchQueryNotFound([string]$oldStr, [string]$queryText, $currentDsNode, [string]$dsName) {
+	$schNs = "http://v8.1c.ru/8.1/data-composition-system/schema"
+	$lines = @("Substring not found in query of dataset '$dsName'.")
+
+	# Step 1 — cross-dataset probe
+	foreach ($ds in (Get-AllDataSets)) {
+		if ($ds -eq $currentDsNode) { continue }
+		$q = Find-FirstElement $ds @("query") $schNs
+		if (-not $q) { continue }
+		$qt = Normalize-LineEndings $q.InnerText
+		if ($qt.Contains($oldStr)) {
+			$otherName = Get-DataSetName $ds
+			$lines += "Found in dataset '$otherName' instead — wrong -DataSet?"
+			return ($lines -join "`n")
+		}
+	}
+
+	# Step 2 — tolerant probe (whitespace + NBSP collapsed)
+	$normNeedle = Collapse-Whitespace $oldStr
+	$normHay = Collapse-Whitespace $queryText
+	$tolerant = ($normNeedle.Length -gt 0 -and $normHay.Contains($normNeedle))
+
+	# Step 3 — prefix divergence (used by both Step 2 reporting and standalone Step 3)
+	$prefix = Find-LongestPrefixMatch -haystack $queryText -needle $oldStr
+	$divergence = $null
+	if ($prefix.Length -gt 0 -and $prefix.Length -lt $oldStr.Length) {
+		$queryPos = $prefix.Offset + $prefix.Length
+		$searchChar = $oldStr[$prefix.Length]
+		$beforeLen = [Math]::Min(20, $prefix.Length)
+		$before = $oldStr.Substring($prefix.Length - $beforeLen, $beforeLen)
+		$divergence = [ordered]@{
+			matched = $prefix.Length
+			total = $oldStr.Length
+			before = $before
+			searchChar = $searchChar
+			queryChar = $(if ($queryPos -lt $queryText.Length) { $queryText[$queryPos] } else { $null })
+		}
+	}
+
+	if ($tolerant) {
+		$lines += "Not found exactly, but would match with whitespace normalized (tabs/spaces/NBSP)."
+		if ($divergence) {
+			$lines += "Diverged at offset $($divergence.matched) of $($divergence.total):"
+			$lines += "  before:    '$(Escape-Whitespace $divergence.before)'"
+			$lines += "  in search: '$(Escape-Whitespace ([string]$divergence.searchChar))' (U+$('{0:X4}' -f [int]$divergence.searchChar))"
+			if ($null -ne $divergence.queryChar) {
+				$lines += "  in query:  '$(Escape-Whitespace ([string]$divergence.queryChar))' (U+$('{0:X4}' -f [int]$divergence.queryChar))"
+			}
+		}
+		return ($lines -join "`n")
+	}
+
+	# Step 3 standalone
+	if ($prefix.Length -eq 0) {
+		$lines += "No common prefix with query. Check -DataSet (current: '$dsName')."
+		return ($lines -join "`n")
+	}
+	$lines += "Matched first $($divergence.matched) of $($divergence.total) chars, then diverged:"
+	$lines += "  before:    '$(Escape-Whitespace $divergence.before)'"
+	$lines += "  in search: '$(Escape-Whitespace ([string]$divergence.searchChar))' (U+$('{0:X4}' -f [int]$divergence.searchChar))"
+	if ($null -ne $divergence.queryChar) {
+		$lines += "  in query:  '$(Escape-Whitespace ([string]$divergence.queryChar))' (U+$('{0:X4}' -f [int]$divergence.queryChar))"
+	} else {
+		$lines += "  in query:  (end of query)"
+	}
+	return ($lines -join "`n")
 }
 
 function Resolve-DataSet {
@@ -1717,6 +2006,18 @@ function Get-ContainerChildIndent($container) {
 
 # --- 6. Load XML ---
 
+# Capture raw original BEFORE DOM parse — needed at save time to:
+#   (a) restore exact root <DataCompositionSchema xmlns=...> opening tag (DOM serializer
+#       collapses multi-line xmlns into a single line);
+#   (b) detect NO-OP via byte-equality as an extra safety net.
+$script:RawOriginal = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
+$rootOpenMatch = [regex]::Match($script:RawOriginal, '<DataCompositionSchema\b[^>]*>')
+if ($rootOpenMatch.Success) { $script:RawRootOpening = $rootOpenMatch.Value } else { $script:RawRootOpening = $null }
+
+# Detect line ending convention so save can normalize back to whatever the source used.
+# 1С Designer writes CRLF on Windows; LF-edited files should stay LF.
+$script:LineEnding = if ($script:RawOriginal.Contains("`r`n")) { "`r`n" } else { "`n" }
+
 $xmlDoc = New-Object System.Xml.XmlDocument
 $xmlDoc.PreserveWhitespace = $true
 $xmlDoc.Load($resolvedPath)
@@ -1767,7 +2068,7 @@ switch ($Operation) {
 				Insert-BeforeElement $dsNode $node $refNode $childIndent
 			}
 
-			Write-Host "[OK] Field `"$($parsed.dataPath)`" added to dataset `"$dsName`""
+			$script:Dirty = $true; Write-Host "[OK] Field `"$($parsed.dataPath)`" added to dataset `"$dsName`""
 
 			if (-not $NoSelection) {
 				$settings = Resolve-VariantSettings
@@ -1783,7 +2084,7 @@ switch ($Operation) {
 					foreach ($node in $selNodes) {
 						Insert-BeforeElement $selection $node $null $selIndent
 					}
-					Write-Host "[OK] Field `"$($parsed.dataPath)`" added to selection of variant `"$varName`""
+					$script:Dirty = $true; Write-Host "[OK] Field `"$($parsed.dataPath)`" added to selection of variant `"$varName`""
 				}
 			}
 		}
@@ -1819,7 +2120,7 @@ switch ($Operation) {
 				Insert-BeforeElement $root $node $refNode $childIndent
 			}
 
-			Write-Host "[OK] TotalField `"$($parsed.dataPath)`" = $($parsed.expression) added"
+			$script:Dirty = $true; Write-Host "[OK] TotalField `"$($parsed.dataPath)`" = $($parsed.expression) added"
 		}
 	}
 
@@ -1853,7 +2154,7 @@ switch ($Operation) {
 				Insert-BeforeElement $root $node $refNode $childIndent
 			}
 
-			Write-Host "[OK] CalculatedField `"$($parsed.dataPath)`" = $($parsed.expression) added"
+			$script:Dirty = $true; Write-Host "[OK] CalculatedField `"$($parsed.dataPath)`" = $($parsed.expression) added"
 
 			if (-not $NoSelection) {
 				$settings = Resolve-VariantSettings
@@ -1869,7 +2170,7 @@ switch ($Operation) {
 					foreach ($node in $selNodes) {
 						Insert-BeforeElement $selection $node $null $selIndent
 					}
-					Write-Host "[OK] Field `"$($parsed.dataPath)`" added to selection of variant `"$varName`""
+					$script:Dirty = $true; Write-Host "[OK] Field `"$($parsed.dataPath)`" added to selection of variant `"$varName`""
 				}
 			}
 		}
@@ -1907,9 +2208,9 @@ switch ($Operation) {
 				}
 			}
 
-			Write-Host "[OK] Parameter `"$($parsed.name)`" added"
+			$script:Dirty = $true; Write-Host "[OK] Parameter `"$($parsed.name)`" added"
 			if ($parsed.autoDates) {
-				Write-Host "[OK] Auto-parameters `"ДатаНачала`", `"ДатаОкончания`" added"
+				$script:Dirty = $true; Write-Host "[OK] Auto-parameters `"ДатаНачала`", `"ДатаОкончания`" added"
 			}
 		}
 	}
@@ -1951,8 +2252,22 @@ switch ($Operation) {
 						$existingTitle = $ch; break
 					}
 				}
+				# If the existing title has multiple <v8:item> (multi-language: ru + en + …),
+				# patch only the ru <v8:content> via raw-string surgery to preserve other langs.
+				# Otherwise rebuild as ru-only fragment.
+				$titleFrag = $null
 				if ($existingTitle) {
+					$rawTitle = $existingTitle.OuterXml
+					$rawTitle = [regex]::Replace($rawTitle, ' xmlns(?::\w+)?="[^"]*"', '')
+					# Count <v8:item> occurrences — if >1, treat as multi-lang.
+					$itemCount = ([regex]::Matches($rawTitle, '<v8:item>')).Count
+					if ($itemCount -gt 1) {
+						$titleFrag = $childIndent + (Patch-MLTextRu $rawTitle $titleVal $childIndent)
+					}
 					Remove-NodeWithWhitespace $existingTitle
+				}
+				if (-not $titleFrag) {
+					$titleFrag = Build-MLTextXml -tag "title" -text $titleVal -indent $childIndent
 				}
 				# Insert before first of (valueType, value, useRestriction, expression, availableAsField, ...)
 				$titleRef = $null
@@ -1961,12 +2276,11 @@ switch ($Operation) {
 						$titleRef = $ch; break
 					}
 				}
-				$titleFrag = Build-MLTextXml -tag "title" -text $titleVal -indent $childIndent
 				$titleNodes = Import-Fragment $xmlDoc $titleFrag
 				foreach ($node in $titleNodes) {
 					Insert-BeforeElement $paramEl $node $titleRef $childIndent
 				}
-				Write-Host "[OK] Parameter `"$paramName`": title set to `"$titleVal`""
+				$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`": title set to `"$titleVal`""
 			}
 
 			# Separate availableValue=... from simple kv pairs
@@ -2008,8 +2322,20 @@ switch ($Operation) {
 								}
 							}
 						}
-						$valueLines = Build-ParamValueXml -type $declaredType -value $value -indent $childIndent
-						$fragXml = $valueLines -join "`r`n"
+						# Detect valueListAllowed flag on the parameter — empty value should be omitted
+						$vlaSet = $false
+						foreach ($ch in $paramEl.ChildNodes) {
+							if ($ch.NodeType -eq 'Element' -and $ch.LocalName -eq 'valueListAllowed' -and $ch.NamespaceURI -eq $schNs) {
+								if ($ch.InnerText.Trim() -eq 'true') { $vlaSet = $true }
+								break
+							}
+						}
+						if (Test-EmptyValue $value) {
+							$fragXml = Build-EmptyValueXml -type $declaredType -indent $childIndent -tagPrefix "" -tagName "value" -valueListAllowed $vlaSet
+						} else {
+							$valueLines = Build-ParamValueXml -type $declaredType -value $value -indent $childIndent
+							$fragXml = $valueLines -join "`n"
+						}
 
 						$wasExisting = ($null -ne $existing)
 						if ($existing) {
@@ -2028,15 +2354,17 @@ switch ($Operation) {
 								}
 							}
 						}
-						$nodes = Import-Fragment $xmlDoc $fragXml
-						foreach ($node in $nodes) {
-							Insert-BeforeElement $paramEl $node $refNode $childIndent
+						if ($fragXml) {
+							$nodes = Import-Fragment $xmlDoc $fragXml
+							foreach ($node in $nodes) {
+								Insert-BeforeElement $paramEl $node $refNode $childIndent
+							}
 						}
 						$verb = if ($wasExisting) { "updated" } else { "added" }
-						Write-Host "[OK] Parameter `"$paramName`": value $verb to $value"
+						$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`": value $verb to $value"
 					} elseif ($existing) {
 						$existing.InnerText = $value
-						Write-Host "[OK] Parameter `"$paramName`": $key updated to $value"
+						$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`": $key updated to $value"
 					} else {
 						# Schema order: ...value, useRestriction, availableValue*, denyIncompleteValues, use
 						$refNode = $null
@@ -2052,7 +2380,7 @@ switch ($Operation) {
 						foreach ($node in $nodes) {
 							Insert-BeforeElement $paramEl $node $refNode $childIndent
 						}
-						Write-Host "[OK] Parameter `"$paramName`": $key=$value added"
+						$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`": $key=$value added"
 					}
 				}
 			}
@@ -2095,13 +2423,13 @@ switch ($Operation) {
 				}
 				foreach ($av in $avItems) {
 					$avLines = Build-AvailableValueFragment -item $av -declaredType $declaredType -indent $childIndent
-					$fragXml = $avLines -join "`r`n"
+					$fragXml = $avLines -join "`n"
 					$nodes = Import-Fragment $xmlDoc $fragXml
 					foreach ($node in $nodes) {
 						Insert-BeforeElement $paramEl $node $refNode $childIndent
 					}
 				}
-				Write-Host "[OK] Parameter `"$paramName`": availableValue set to $($avItems.Count) item(s)"
+				$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`": availableValue set to $($avItems.Count) item(s)"
 			}
 
 			# Process @hidden / @always flags (idempotent)
@@ -2138,7 +2466,7 @@ switch ($Operation) {
 					foreach ($node in $nodes) { Insert-BeforeElement $paramEl $node $refNode $childIndent }
 				}
 
-				Write-Host "[OK] Parameter `"$paramName`": @hidden applied"
+				$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`": @hidden applied"
 			}
 
 			if ($flagAlways) {
@@ -2152,7 +2480,7 @@ switch ($Operation) {
 					$nodes = Import-Fragment $xmlDoc "$childIndent<use>Always</use>"
 					foreach ($node in $nodes) { Insert-BeforeElement $paramEl $node $null $childIndent }
 				}
-				Write-Host "[OK] Parameter `"$paramName`": @always applied"
+				$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`": @always applied"
 			}
 		}
 	}
@@ -2230,7 +2558,7 @@ switch ($Operation) {
 				}
 			}
 
-			Write-Host "[OK] Parameter renamed: `"$oldName`" => `"$newName`" (expressions updated: $exprUpdated, dataParameters updated: $dpUpdated)"
+			$script:Dirty = $true; Write-Host "[OK] Parameter renamed: `"$oldName`" => `"$newName`" (expressions updated: $exprUpdated, dataParameters updated: $dpUpdated)"
 		}
 	}
 
@@ -2307,7 +2635,7 @@ switch ($Operation) {
 				Insert-BeforeElement $root $pe $anchor $childIndent
 			}
 
-			Write-Host "[OK] Parameters reordered ($($allParams.Count) total, $($order.Count) explicit)"
+			$script:Dirty = $true; Write-Host "[OK] Parameters reordered ($($allParams.Count) total, $($order.Count) explicit)"
 		}
 	}
 
@@ -2327,7 +2655,7 @@ switch ($Operation) {
 				Insert-BeforeElement $filterEl $node $null $filterIndent
 			}
 
-			Write-Host "[OK] Filter `"$($parsed.field) $($parsed.op)`" added to variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] Filter `"$($parsed.field) $($parsed.op)`" added to variant `"$varName`""
 		}
 	}
 
@@ -2347,7 +2675,7 @@ switch ($Operation) {
 				Insert-BeforeElement $dpEl $node $null $dpIndent
 			}
 
-			Write-Host "[OK] DataParameter `"$($parsed.parameter)`" added to variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] DataParameter `"$($parsed.parameter)`" added to variant `"$varName`""
 		}
 	}
 
@@ -2389,7 +2717,7 @@ switch ($Operation) {
 			}
 
 			$desc = if ($parsed.field -eq "Auto") { "Auto" } else { "$($parsed.field) $($parsed.direction)" }
-			Write-Host "[OK] Order `"$desc`" added to variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] Order `"$desc`" added to variant `"$varName`""
 		}
 	}
 
@@ -2452,7 +2780,7 @@ switch ($Operation) {
 			}
 
 			$target = if ($groupName) { "group `"$groupName`"" } else { "variant `"$varName`"" }
-			Write-Host "[OK] Selection `"$fieldName`" added to $target"
+			$script:Dirty = $true; Write-Host "[OK] Selection `"$fieldName`" added to $target"
 		}
 	}
 
@@ -2469,7 +2797,7 @@ switch ($Operation) {
 		# InnerText setter handles XML escaping automatically
 		$queryEl.InnerText = Resolve-QueryValue $Value $script:queryBaseDir
 
-		Write-Host "[OK] Query replaced in dataset `"$dsName`""
+		$script:Dirty = $true; Write-Host "[OK] Query replaced in dataset `"$dsName`""
 	}
 
 	"patch-query" {
@@ -2494,13 +2822,14 @@ switch ($Operation) {
 				Write-Error "patch-query value must contain ' => ' separator: old => new"
 				exit 1
 			}
-			$oldStr = $val.Substring(0, $sepIdx)
-			$newStr = $val.Substring($sepIdx + 4)
-			$queryText = $queryEl.InnerText
+			$oldStr = Normalize-LineEndings $val.Substring(0, $sepIdx)
+			$newStr = Normalize-LineEndings $val.Substring($sepIdx + 4)
+			$queryText = Normalize-LineEndings $queryEl.InnerText
 
 			$count = ([regex]::Matches($queryText, [regex]::Escape($oldStr))).Count
 			if ($count -eq 0) {
-				Write-Error "Substring not found in query of dataset '$dsName': $oldStr"
+				$diag = Format-PatchQueryNotFound $oldStr $queryText $dsNode $dsName
+				Write-Error $diag
 				exit 1
 			}
 			if ($once -and $count -ne 1) {
@@ -2510,7 +2839,7 @@ switch ($Operation) {
 
 			$queryEl.InnerText = $queryText.Replace($oldStr, $newStr)
 			$suffix = if ($once) { " (1 occurrence)" } else { " ($count occurrence(s))" }
-			Write-Host "[OK] Query patched in dataset `"$dsName`": replaced '$oldStr'$suffix"
+			$script:Dirty = $true; Write-Host "[OK] Query patched in dataset `"$dsName`": replaced '$oldStr'$suffix"
 		}
 	}
 
@@ -2528,9 +2857,9 @@ switch ($Operation) {
 			$existingParam = Find-ElementByChildValue $outputEl "item" "parameter" $parsed.key $corNs
 			if ($existingParam) {
 				Remove-NodeWithWhitespace $existingParam
-				Write-Host "[OK] Replaced outputParameter `"$($parsed.key)`" in variant `"$varName`""
+				$script:Dirty = $true; Write-Host "[OK] Replaced outputParameter `"$($parsed.key)`" in variant `"$varName`""
 			} else {
-				Write-Host "[OK] OutputParameter `"$($parsed.key)`" added to variant `"$varName`""
+				$script:Dirty = $true; Write-Host "[OK] OutputParameter `"$($parsed.key)`" added to variant `"$varName`""
 			}
 
 			$fragXml = Build-OutputParamFragment -parsed $parsed -indent $outputIndent
@@ -2572,7 +2901,7 @@ switch ($Operation) {
 			}
 		}
 
-		Write-Host "[OK] Structure set in variant `"$varName`": $Value"
+		$script:Dirty = $true; Write-Host "[OK] Structure set in variant `"$varName`": $Value"
 	}
 
 	"modify-structure" {
@@ -2659,7 +2988,7 @@ switch ($Operation) {
 				$lines += "$itemIndent`t<dcsset:periodAdditionBegin xsi:type=`"xs:dateTime`">0001-01-01T00:00:00</dcsset:periodAdditionBegin>"
 				$lines += "$itemIndent`t<dcsset:periodAdditionEnd xsi:type=`"xs:dateTime`">0001-01-01T00:00:00</dcsset:periodAdditionEnd>"
 				$lines += "$itemIndent</dcsset:item>"
-				$fragXml = $lines -join "`r`n"
+				$fragXml = $lines -join "`n"
 				$nodes = Import-Fragment $xmlDoc $fragXml
 				foreach ($node in $nodes) {
 					Insert-BeforeElement $giEl $node $null $itemIndent
@@ -2667,7 +2996,7 @@ switch ($Operation) {
 			}
 
 			$desc = if ($t.groupBy.Count -eq 0) { "details" } else { $t.groupBy -join ', ' }
-			Write-Host "[OK] Group `"$($t.name)`" groupItems updated: $desc"
+			$script:Dirty = $true; Write-Host "[OK] Group `"$($t.name)`" groupItems updated: $desc"
 		}
 	}
 
@@ -2697,7 +3026,7 @@ switch ($Operation) {
 
 			$desc = "$($parsed.source) > $($parsed.dest) on $($parsed.sourceExpr) = $($parsed.destExpr)"
 			if ($parsed.parameter) { $desc += " [param $($parsed.parameter)]" }
-			Write-Host "[OK] DataSetLink `"$desc`" added"
+			$script:Dirty = $true; Write-Host "[OK] DataSetLink `"$desc`" added"
 		}
 	}
 
@@ -2749,7 +3078,7 @@ switch ($Operation) {
 				Insert-BeforeElement $root $node $refNode $childIndent
 			}
 
-			Write-Host "[OK] DataSet `"$($parsed.name)`" added (dataSource=$dsSourceName)"
+			$script:Dirty = $true; Write-Host "[OK] DataSet `"$($parsed.name)`" added (dataSource=$dsSourceName)"
 		}
 	}
 
@@ -2795,7 +3124,7 @@ switch ($Operation) {
 				Insert-BeforeElement $root $node $refNode $childIndent
 			}
 
-			Write-Host "[OK] Variant `"$($parsed.name)`" [`"$($parsed.presentation)`"] added"
+			$script:Dirty = $true; Write-Host "[OK] Variant `"$($parsed.name)`" [`"$($parsed.presentation)`"] added"
 		}
 	}
 
@@ -2818,7 +3147,7 @@ switch ($Operation) {
 			$desc = "$($parsed.param) = $($parsed.value)"
 			if ($parsed.filter) { $desc += " when $($parsed.filter.field) $($parsed.filter.op)" }
 			if ($parsed.fields -and $parsed.fields.Count -gt 0) { $desc += " for $($parsed.fields -join ', ')" }
-			Write-Host "[OK] ConditionalAppearance `"$desc`" added to variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] ConditionalAppearance `"$desc`" added to variant `"$varName`""
 		}
 	}
 
@@ -2828,7 +3157,7 @@ switch ($Operation) {
 		$selection = Find-FirstElement $settings @("selection") $setNs
 		if ($selection) {
 			Clear-ContainerChildren $selection
-			Write-Host "[OK] Selection cleared in variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] Selection cleared in variant `"$varName`""
 		} else {
 			Write-Host "[INFO] No selection section in variant `"$varName`""
 		}
@@ -2840,7 +3169,7 @@ switch ($Operation) {
 		$orderEl = Find-FirstElement $settings @("order") $setNs
 		if ($orderEl) {
 			Clear-ContainerChildren $orderEl
-			Write-Host "[OK] Order cleared in variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] Order cleared in variant `"$varName`""
 		} else {
 			Write-Host "[INFO] No order section in variant `"$varName`""
 		}
@@ -2852,7 +3181,7 @@ switch ($Operation) {
 		$filterEl = Find-FirstElement $settings @("filter") $setNs
 		if ($filterEl) {
 			Clear-ContainerChildren $filterEl
-			Write-Host "[OK] Filter cleared in variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] Filter cleared in variant `"$varName`""
 		} else {
 			Write-Host "[INFO] No filter section in variant `"$varName`""
 		}
@@ -2864,7 +3193,7 @@ switch ($Operation) {
 		$caEl = Find-FirstElement $settings @("conditionalAppearance") $setNs
 		if ($caEl) {
 			Clear-ContainerChildren $caEl
-			Write-Host "[OK] ConditionalAppearance cleared in variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] ConditionalAppearance cleared in variant `"$varName`""
 		} else {
 			Write-Host "[INFO] No conditionalAppearance section in variant `"$varName`""
 		}
@@ -2927,7 +3256,7 @@ switch ($Operation) {
 				Set-OrCreateChildElement $filterItem "userSettingID" $setNs $uid $itemIndent
 			}
 
-			Write-Host "[OK] Filter `"$($parsed.field)`" modified in variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] Filter `"$($parsed.field)`" modified in variant `"$varName`""
 		}
 	}
 
@@ -2973,6 +3302,8 @@ switch ($Operation) {
 					$valLines += "$itemIndent`t<v8:startDate>0001-01-01T00:00:00</v8:startDate>"
 					$valLines += "$itemIndent`t<v8:endDate>0001-01-01T00:00:00</v8:endDate>"
 					$valLines += "$itemIndent</dcscor:value>"
+				} elseif (Test-EmptyValue $parsed.value) {
+					$valLines += "$itemIndent<dcscor:value xsi:nil=`"true`"/>"
 				} elseif ("$($parsed.value)" -match '^\d{4}-\d{2}-\d{2}T') {
 					$valLines += "$itemIndent<dcscor:value xsi:type=`"xs:dateTime`">$(Esc-Xml "$($parsed.value)")</dcscor:value>"
 				} elseif ("$($parsed.value)" -eq "true" -or "$($parsed.value)" -eq "false") {
@@ -2980,7 +3311,7 @@ switch ($Operation) {
 				} else {
 					$valLines += "$itemIndent<dcscor:value xsi:type=`"xs:string`">$(Esc-Xml "$($parsed.value)")</dcscor:value>"
 				}
-				$valXml = $valLines -join "`r`n"
+				$valXml = $valLines -join "`n"
 				$valNodes = Import-Fragment $xmlDoc $valXml
 				foreach ($node in $valNodes) {
 					Insert-BeforeElement $dpItem $node $null $itemIndent
@@ -3014,7 +3345,7 @@ switch ($Operation) {
 				Set-OrCreateChildElement $dpItem "userSettingID" $setNs $uid $itemIndent
 			}
 
-			Write-Host "[OK] DataParameter `"$($parsed.parameter)`" modified in variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] DataParameter `"$($parsed.parameter)`" modified in variant `"$varName`""
 		}
 	}
 
@@ -3044,6 +3375,14 @@ switch ($Operation) {
 				type = if ($parsed.type) { $parsed.type } else { $existing.type }
 				roles = if ($parsed.roles -and $parsed.roles.Count -gt 0) { $parsed.roles } else { $existing.roles }
 				restrict = if ($parsed.restrict -and $parsed.restrict.Count -gt 0) { $parsed.restrict } else { $existing.restrict }
+				# Preserve raw <valueType> only when user did NOT override type via shorthand —
+				# otherwise the override path rebuilds valueType from $parsed.type.
+				rawValueType = if ($parsed.type) { $null } else { $existing._rawValueType }
+				# Preserve raw multi-lang title; pass existing ru content for change detection.
+				_rawTitle = $existing._rawTitle
+				_existingTitleRu = $existing.title
+				# Pass-through unknown children (e.g. <editFormat>, <appearance>, custom extensions).
+				_unknownChildren = $existing._unknownChildren
 			}
 
 			# Remember position (NextSibling after whitespace)
@@ -3065,7 +3404,7 @@ switch ($Operation) {
 				Insert-BeforeElement $dsNode $node $nextSib $childIndent
 			}
 
-			Write-Host "[OK] Field `"$fieldName`" modified in dataset `"$dsName`""
+			$script:Dirty = $true; Write-Host "[OK] Field `"$fieldName`" modified in dataset `"$dsName`""
 		}
 	}
 
@@ -3103,16 +3442,32 @@ switch ($Operation) {
 
 			$fieldIndent = Get-ChildIndent $fieldEl
 
-			# Remove existing <role>
+			# Remove existing <role> — but first capture OuterXml of any sub-children that
+			# Build-RoleXml won't re-emit (e.g. <dcscom:addition>, <dcscom:groupFields>,
+			# custom extension elements). Preserved across rebuild.
 			$oldRole = $null
 			foreach ($ch in $fieldEl.ChildNodes) {
 				if ($ch.NodeType -eq 'Element' -and $ch.LocalName -eq 'role' -and $ch.NamespaceURI -eq $schNs) { $oldRole = $ch; break }
 			}
-			if ($oldRole) { Remove-NodeWithWhitespace $oldRole }
+			$knownRoleChildren = @('periodNumber','periodType','dimension','ignoreNullsInGroups','balance','account','accountTypeExpression','additionType','addition')
+			$preservedRoleChildren = @()
+			if ($oldRole) {
+				foreach ($gc in $oldRole.ChildNodes) {
+					if ($gc.NodeType -ne 'Element') { continue }
+					if ($knownRoleChildren -contains $gc.LocalName) { continue }
+					# kv keys override the same-named sub-element on rebuild — don't preserve
+					# what the user explicitly set.
+					if ($kv.Contains($gc.LocalName)) { continue }
+					$raw = $gc.OuterXml
+					$raw = [regex]::Replace($raw, ' xmlns(?::\w+)?="[^"]*"', '')
+					$preservedRoleChildren += $raw
+				}
+				Remove-NodeWithWhitespace $oldRole
+			}
 
 			# Empty spec — remove only
 			if ($flags.Count -eq 0 -and $kv.Count -eq 0) {
-				Write-Host "[OK] Field `"$dataPath`" role cleared"
+				$script:Dirty = $true; Write-Host "[OK] Field `"$dataPath`" role cleared"
 				continue
 			}
 
@@ -3130,8 +3485,11 @@ switch ($Operation) {
 			foreach ($k in $kv.Keys) {
 				$lines += "$fieldIndent`t<dcscom:$k>$(Esc-Xml $kv[$k])</dcscom:$k>"
 			}
+			foreach ($raw in $preservedRoleChildren) {
+				$lines += "$fieldIndent`t" + $raw
+			}
 			$lines += "$fieldIndent</role>"
-			$fragXml = $lines -join "`r`n"
+			$fragXml = $lines -join "`n"
 
 			# Insert before <valueType>, else before <inputParameters>, else at end
 			$refNode = $null
@@ -3146,7 +3504,7 @@ switch ($Operation) {
 			$desc = @()
 			if ($flags.Count -gt 0) { $desc += ($flags | ForEach-Object { "@$_" }) -join ' ' }
 			if ($kv.Count -gt 0) { $desc += ($kv.Keys | ForEach-Object { "$_=$($kv[$_])" }) -join ' ' }
-			Write-Host "[OK] Field `"$dataPath`" role set: $($desc -join ' ')"
+			$script:Dirty = $true; Write-Host "[OK] Field `"$dataPath`" role set: $($desc -join ' ')"
 		}
 	}
 
@@ -3164,7 +3522,7 @@ switch ($Operation) {
 			}
 
 			Remove-NodeWithWhitespace $fieldEl
-			Write-Host "[OK] Field `"$fieldName`" removed from dataset `"$dsName`""
+			$script:Dirty = $true; Write-Host "[OK] Field `"$fieldName`" removed from dataset `"$dsName`""
 
 			# Also remove from selection in variant
 			try {
@@ -3175,7 +3533,7 @@ switch ($Operation) {
 					$selItem = Find-ElementByChildValue $selection "item" "field" $fieldName $setNs
 					if ($selItem) {
 						Remove-NodeWithWhitespace $selItem
-						Write-Host "[OK] Field `"$fieldName`" removed from selection of variant `"$varName`""
+						$script:Dirty = $true; Write-Host "[OK] Field `"$fieldName`" removed from selection of variant `"$varName`""
 					}
 				}
 			} catch {
@@ -3196,7 +3554,7 @@ switch ($Operation) {
 			}
 
 			Remove-NodeWithWhitespace $totalEl
-			Write-Host "[OK] TotalField `"$dataPath`" removed"
+			$script:Dirty = $true; Write-Host "[OK] TotalField `"$dataPath`" removed"
 		}
 	}
 
@@ -3212,7 +3570,7 @@ switch ($Operation) {
 			}
 
 			Remove-NodeWithWhitespace $calcEl
-			Write-Host "[OK] CalculatedField `"$dataPath`" removed"
+			$script:Dirty = $true; Write-Host "[OK] CalculatedField `"$dataPath`" removed"
 
 			# Also remove from selection
 			try {
@@ -3223,7 +3581,7 @@ switch ($Operation) {
 					$selItem = Find-ElementByChildValue $selection "item" "field" $dataPath $setNs
 					if ($selItem) {
 						Remove-NodeWithWhitespace $selItem
-						Write-Host "[OK] Field `"$dataPath`" removed from selection of variant `"$varName`""
+						$script:Dirty = $true; Write-Host "[OK] Field `"$dataPath`" removed from selection of variant `"$varName`""
 					}
 				}
 			} catch { }
@@ -3242,7 +3600,7 @@ switch ($Operation) {
 			}
 
 			Remove-NodeWithWhitespace $paramEl
-			Write-Host "[OK] Parameter `"$paramName`" removed"
+			$script:Dirty = $true; Write-Host "[OK] Parameter `"$paramName`" removed"
 		}
 	}
 
@@ -3266,7 +3624,7 @@ switch ($Operation) {
 			}
 
 			Remove-NodeWithWhitespace $filterItem
-			Write-Host "[OK] Filter for `"$fieldName`" removed from variant `"$varName`""
+			$script:Dirty = $true; Write-Host "[OK] Filter for `"$fieldName`" removed from variant `"$varName`""
 		}
 	}
 
@@ -3400,7 +3758,7 @@ switch ($Operation) {
 					$searchStart = $cellEnd + 1
 				}
 
-				Write-Host "[OK] $drillName → $tplName (param + $cellCount cell(s))"
+				$script:Dirty = $true; Write-Host "[OK] $drillName → $tplName (param + $cellCount cell(s))"
 			}
 		}
 
@@ -3415,15 +3773,40 @@ switch ($Operation) {
 		# Write directly — skip DOM save
 		$enc = New-Object System.Text.UTF8Encoding($true)
 		[System.IO.File]::WriteAllText($resolvedPath, $rawText, $enc)
-		Write-Host "[OK] Saved $resolvedPath"
+		$script:Dirty = $true; Write-Host "[OK] Saved $resolvedPath"
 		exit 0
 	}
 }
 
 # --- 9. Save ---
 
+if (-not $script:Dirty) {
+	Write-Host "[INFO] No changes -- file untouched"
+	exit 0
+}
+
 $content = $xmlDoc.OuterXml
 $content = $content -replace '(?<=<\?xml[^?]*encoding=")utf-8(?=")', 'UTF-8'
+
+# Format-preserve post-processing:
+#   (1) restore the original raw <DataCompositionSchema ...> opening tag — DOM collapses
+#       multi-line xmlns declarations into one line.
+if ($script:RawRootOpening) {
+	$content = [regex]::Replace($content, '<DataCompositionSchema\b[^>]*>', { param($m) $script:RawRootOpening })
+}
+
+#   (2) normalize self-closing tags: `.NET XmlDocument` adds a space before `/>`
+#       (`<foo bar="x" />`) but 1C-Designer writes `<foo bar="x"/>`. Strip the space.
+$content = [regex]::Replace($content, '(?<=\S) />', '/>')
+
+#   (3) normalize line endings to match source — operations may mix LF (from new
+#       fragments) with whatever the source used (CRLF on Windows, LF on Linux/git).
+if ($script:LineEnding -eq "`r`n") {
+	$content = $content -replace '(?<!\r)\n', "`r`n"
+} else {
+	$content = $content -replace "`r`n", "`n"
+}
+
 $enc = New-Object System.Text.UTF8Encoding($true)
 [System.IO.File]::WriteAllText($resolvedPath, $content, $enc)
 

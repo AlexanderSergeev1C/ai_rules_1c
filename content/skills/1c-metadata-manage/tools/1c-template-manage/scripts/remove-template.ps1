@@ -1,6 +1,9 @@
-﻿param(
+﻿# template-remove v1.2 — Remove template from 1C object
+# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+param(
 	[Parameter(Mandatory)]
-	[string]$ProcessorName,
+	[Alias("ProcessorName")]
+	[string]$ObjectName,
 
 	[Parameter(Mandatory)]
 	[string]$TemplateName,
@@ -9,16 +12,18 @@
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
 # --- Проверки ---
 
-$rootXmlPath = Join-Path $SrcDir "$ProcessorName.xml"
+$rootXmlPath = Join-Path $SrcDir "$ObjectName.xml"
 if (-not (Test-Path $rootXmlPath)) {
 	Write-Error "Корневой файл обработки не найден: $rootXmlPath"
 	exit 1
 }
 
-$processorDir = Join-Path $SrcDir $ProcessorName
+$processorDir = Join-Path $SrcDir $ObjectName
 $templatesDir = Join-Path $processorDir "Templates"
 $templateMetaPath = Join-Path $templatesDir "$TemplateName.xml"
 $templateDir = Join-Path $templatesDir $TemplateName
@@ -61,6 +66,13 @@ foreach ($node in $templateNodes) {
 		$parent.RemoveChild($node) | Out-Null
 		break
 	}
+}
+
+# Очистить MainDataCompositionSchema если указывала на этот макет
+$mainDCS = $xmlDoc.SelectSingleNode("//md:MainDataCompositionSchema", $nsMgr)
+if ($mainDCS -and $mainDCS.InnerText -match "Template\.$([regex]::Escape($TemplateName))$") {
+	$mainDCS.InnerText = ""
+	Write-Host "[OK] Очищён MainDataCompositionSchema"
 }
 
 # Сохранить с BOM

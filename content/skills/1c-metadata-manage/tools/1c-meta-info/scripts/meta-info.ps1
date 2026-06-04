@@ -1,4 +1,4 @@
-﻿# meta-info v1.1 — Compact summary of 1C metadata object
+﻿# meta-info v1.2 — Compact summary of 1C metadata object
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 param(
 	[Parameter(Mandatory=$true)][Alias('Path')][string]$ObjectPath,
@@ -422,6 +422,22 @@ $objName = $props.SelectSingleNode("md:Name", $ns).InnerText
 $synNode = $props.SelectSingleNode("md:Synonym", $ns)
 $synonym = Get-MLText $synNode
 
+# Presentations (type-choice dialogs show "Представление объекта" as the ref type name)
+$objPresentation = Get-MLText $props.SelectSingleNode("md:ObjectPresentation", $ns)
+$extObjPresentation = Get-MLText $props.SelectSingleNode("md:ExtendedObjectPresentation", $ns)
+$listPresentation = Get-MLText $props.SelectSingleNode("md:ListPresentation", $ns)
+$extListPresentation = Get-MLText $props.SelectSingleNode("md:ExtendedListPresentation", $ns)
+
+# Reference (ref-typed) metadata objects — those with a ...Ref type
+$refMdTypes = @("Catalog","Document","Enum","ChartOfAccounts","ChartOfCharacteristicTypes",
+	"ChartOfCalculationTypes","ExchangePlan","BusinessProcess","Task")
+$isRefObject = $refMdTypes -contains $mdType
+
+# Effective type presentation: ObjectPresentation -> Synonym -> Name
+$typePresentation = if ($objPresentation) { $objPresentation }
+	elseif ($synonym) { $synonym }
+	else { $objName }
+
 # --- Handle -Name drill-down ---
 $drillDone = $false
 if ($Name -and $childObjs) {
@@ -592,6 +608,17 @@ if (-not $drillDone) {
 	if ($synonym -and $synonym -ne $objName) { $header += " — `"$synonym`"" }
 	$header += " ==="
 	Out $header
+
+	# --- Type presentation (ref objects) ---
+	if ($isRefObject) {
+		Out "Представление типа: $typePresentation"
+		if ($Mode -eq "full") {
+			if ($objPresentation)     { Out "Представление объекта: $objPresentation" }
+			if ($extObjPresentation)  { Out "Расширенное представление объекта: $extObjPresentation" }
+			if ($listPresentation)    { Out "Представление списка: $listPresentation" }
+			if ($extListPresentation) { Out "Расширенное представление списка: $extListPresentation" }
+		}
+	}
 
 	# --- Mode: brief ---
 	if ($Mode -eq "brief") {

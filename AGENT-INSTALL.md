@@ -49,7 +49,7 @@ Use this lean sequence:
 
 2. **Read adapters only.** For each active tool open `adapters/<tool>.yaml` from the clone. These files are small and define, in a closed schema:
    - `detection` — how to confirm the tool is active.
-   - `rules`, `agents`, `commands`, `skills` — `copyTo` target paths (with `{name}` placeholder), `frontmatter.keep`/`drop`/`rename`/`addIf` operations, and copy `mode` (default per-file with frontmatter ops; `verbatim` for skills; `rebuild-toml` for Codex agents).
+   - `rules`, `agents`, `commands`, `skills` — `copyTo` target paths (with `{name}` placeholder), `frontmatter.keep`/`drop`/`rename`/`addIf`/`toolsToPermission` operations, and copy `mode` (default per-file with frontmatter ops; `verbatim` for skills; `rebuild-toml` for Codex agents). `toolsToPermission` (OpenCode only) converts the source `tools` array into OpenCode's `permission` object — see *OpenCode agents: `tools` array → `permission` object* below.
    - `mcp` — how `content/mcp-servers.json` is rendered into the tool's MCP config.
    - `entry` — optional entry-point template (e.g. minimal `CLAUDE.md` pointing at `AGENTS.md`).
 
@@ -57,16 +57,17 @@ Use this lean sequence:
    - `content/rules/` → `<rules.copyTo dir>/`
    - `content/agents/` → `<agents.copyTo dir>/`
    - `content/commands/` → `<commands.copyTo dir>/`
-   - `content/skills/` → `<skills.copyTo dir>/` (mode `verbatim` — copy each skill folder as-is, no transformation)
+   - `content/skills/` → `<skills.copyTo dir>/` (mode `verbatim` — copy **every** skill folder as-is, no transformation). Copy the whole `content/skills/` directory; do **not** cherry-pick a subset. All skills are required, including the non-1C-domain ones (`caveman`, `prompt-enhancer`, `handoff`, `mermaid-diagrams`, `transcribe`, `md-to-docx`, `img-grid-analysis`) — `AGENTS.md` references them and silently skipping any of them leaves a degraded ruleset. Use a single directory copy, not per-skill judgement calls.
    - `content/openspec-bundle/<tool>/` → at the locations encoded in that snapshot, **skip-if-exists**.
 
-4. **Apply frontmatter operations only where needed.** For sections that have `frontmatter.keep` / `drop` / `rename` / `addIf`:
+4. **Apply frontmatter operations only where needed.** For sections that have `frontmatter.keep` / `drop` / `rename` / `addIf` / `toolsToPermission`:
    - For each placed file, read **only** the YAML frontmatter block (between the leading `---` markers — typically the first 5–20 lines). Do not read the body.
    - Rewrite the frontmatter according to the adapter ops and write it back; the body is left untouched.
+   - For OpenCode agents (`agents.frontmatter.toolsToPermission`) — convert the source `tools` array into a `permission` object before applying `keep`/`drop`. See *OpenCode agents: `tools` array → `permission` object* below. **Never** copy the source `tools` array into an OpenCode agent file verbatim — an array fails OpenCode config validation and prevents OpenCode from (re)starting.
    - For sections with `mode: verbatim` (skills) — skip the frontmatter step entirely.
    - For Codex agents (`mode: rebuild-toml`) — render via the adapter's `template`. This is the one case that requires the body, but only for those agent files in `content/agents/` (a small set).
 
-5. **Render the MCP config** from `content/mcp-servers.json` according to the adapter's `mcp.schema` (mcpServers JSON dictionary, OpenCode `mcp[id]` schema, or Codex TOML `[mcp_servers.<id>]`).
+5. **Render the MCP config** from `content/mcp-servers.json` according to the adapter's `mcp.schema` (mcpServers JSON dictionary, OpenCode `mcp[id]` schema, or Codex TOML `[mcp_servers.<id>]`). **OpenCode only:** normalize each server key to start with a letter before writing it under `mcp` — leading `1c`/`1C` → `onec` (so `1c-syntax-checker-mcp` → `onec-syntax-checker-mcp`, `1C-docs-mcp` → `onec-docs-mcp`), any other non-letter-leading id gets an `mcp-` prefix. OpenCode names MCP tools `<server-key>_<tool>` and providers like Moonshot/Kimi reject function names that do not start with a letter (`^[a-zA-Z_]…`), which otherwise breaks the whole request with *"function name is invalid, must start with a letter"*. Canonical ids in `content/mcp-servers.json` and the docs stay `1c-…`; only the OpenCode-rendered key changes. The other adapters keep the verbatim id (Cursor/Claude prefix tool names with `mcp_`/`mcp__`, so a digit-leading key is already safe there). **Target file & merge:** write each tool's MCP into the path declared by `mcp.target` — for OpenCode this is `opencode.json` at the **project root** (NOT `.opencode/opencode.json`, which OpenCode never reads; `.opencode/` holds only agents/commands/modes/plugins/skills/tools/themes), and for Kilo Code it is `.kilo/kilo.json` under the top-level `mcp` key. Both are **shared** user configs (`mcp.merge: true`): deep-merge **only** the top-level `mcp` key and preserve every other key the user has. **OpenCode validates each MCP entry with a strict schema** — emit only `{ type: "remote", url, enabled }` (or `{ type: "local", command: [...], enabled }`); any extra key such as `description` or `connection_id` makes OpenCode reject the whole config and the servers silently never load. After writing it, **recommend that the user restart the AI client** — see *Recommend a restart after MCP changes* below.
 
 6. **Place the always-on layer** (`AGENTS.md`, `USER-RULES.md`, `memory.md`) — see the next section.
 
@@ -75,6 +76,42 @@ Use this lean sequence:
 8. **Scaffold OpenSpec.** Copy `openspec/` into the project in skip-if-exists mode (no overwrites).
 
 9. **Write the manifest** `.ai-rules.json` at the project root: list all placed files with their content sources, the active tools, the source version (`git describe --tags --always` from the clone), the protocol version (`1.0`), the canonical rules directory used for diagnostics / updates, and any detected foreign user-authored files under `foreignFiles`.
+
+### OpenCode agents: `tools` array → `permission` object
+
+The source agent files in `content/agents/*.md` declare capabilities as a `tools` **array** (e.g. `tools: ["Read", "Write", "Edit", "Grep", "Glob", "Shell", "MCP"]`). That shape is correct for Cursor and Claude Code, but **OpenCode rejects a `tools` array** — its `tools` field must be an object (`{write: true, ...}`) and is itself deprecated in favour of `permission` (OpenCode v1.1.1+). Copying the raw array into `.opencode/agent/<name>.md` fails OpenCode config validation and **prevents OpenCode from (re)starting**.
+
+When OpenCode is an active tool, the `agents` adapter therefore declares `frontmatter.toolsToPermission`, which both installation channels MUST apply: convert the `tools` array into a `permission` object **before** the `keep`/`drop` step, then drop `tools` (it is absent from `keep`). The mapping is:
+
+| Source tool | OpenCode permission key |
+| --- | --- |
+| `Read` | `read` |
+| `Write`, `Edit` | `edit` |
+| `Grep` | `grep` |
+| `Glob` | `glob` |
+| `Shell` | `bash` |
+| `MCP` | *(no key — MCP tools are gated by their own names; leave them enabled by default)* |
+
+Each mapped key granted by the source list is set to `allow`; every mapped key **not** granted is set to `deny`, so read-only agents (`1c-explorer`, `1c-code-reviewer`, `1c-arch-reviewer` — whose source `tools` omit `Write`/`Edit`/`Shell`) end up with `edit: deny` / `bash: deny` instead of silently inheriting OpenCode's permissive default tool set. Example for `1c-developer`:
+
+```yaml
+---
+name: 1c-developer
+description: "Expert 1C code developer agent. …"
+model: opus
+permission:
+  read: allow
+  edit: allow
+  grep: allow
+  glob: allow
+  bash: allow
+mode: subagent
+---
+```
+
+### Recommend a restart after MCP changes
+
+After the MCP config is written (init / update / add), **recommend that the user restart their AI client** (CLI or IDE). Most clients — OpenCode in particular — read the MCP configuration and agent definitions only at startup, so newly added MCP servers and subagents will not appear in an already-running session until the client is restarted. This recommendation applies to all tools; the PowerShell installer prints it automatically at the end of `init` / `update` / `add` whenever at least one MCP server was configured.
 
 ### Always-on layer placement
 
@@ -126,6 +163,9 @@ Failures from past agent-driven installs that the protocol explicitly forbids:
 
 - **Installing into the CLI's global config directory.** Symptom: files copied to `~/.config/<tool>/`, `~/.codex/`, `~/.claude/`, `~/.opencode/` or `%APPDATA%\…\<tool>\`. See *Project root is mandatory — no global installs* above.
 - **Inventing directory names instead of reading the adapter.** The on-disk layout per tool is **only** what `adapters/<tool>.yaml` declares under `rules.copyTo`, `agents.copyTo`, `commands.copyTo`, `skills.copyTo`, `mcp.target`. Do not paraphrase: Kilo uses `.kilo/commands/` and `.kilo/agents/` (plural) — never `.kilo/command/` / `.kilo/agent/` (singular). The strings `commands`, `agents` are part of the targeted CLI's lookup contract.
+- **Writing OpenCode MCP into `.opencode/opencode.json` instead of the root `opencode.json`.** OpenCode reads its project config (including the `mcp` key) only from `opencode.json` at the project root. `.opencode/` is for agents/commands/modes/plugins/skills/tools/themes, never the main config file, so MCP written under `.opencode/` is silently ignored — `/mcp` shows nothing and no MCP tools are exposed. Write to the root `opencode.json` and deep-merge only the `mcp` key (per `adapters/opencode.yaml > mcp.target` + `mcp.merge`).
+- **Injecting unknown keys into an OpenCode MCP entry (`description`, `connection_id`, …).** OpenCode validates each entry with a strict schema; an extra key makes it reject the whole config and load no servers. Emit only the documented keys: `{ type: "remote", url, enabled }` / `{ type: "local", command, enabled, environment? }`.
+- **Cherry-picking which skills to copy.** Symptom: some skills (often the non-1C-domain ones — `caveman`, `prompt-enhancer`, `handoff`) missing from the tool's skills directory because the agent decided they were "not 1C". The protocol copies **every** folder under `content/skills/` verbatim in one directory copy; there is no per-skill relevance judgement at install time.
 - **Writing Kilo MCP into the legacy `.kilocode/mcp.json` with the `mcpServers` dictionary.** Current Kilo CLI / Kilo Code (v7.x+) does not read that file — MCP must go into `.kilo/kilo.json` (per `adapters/kilocode.yaml > mcp.target`) under the top-level `mcp` key with per-server entries `{ "type": "remote"|"local", "url"|"command": …, "enabled": true }` (see https://kilo.ai/docs/automate/mcp/using-in-cli). Writing the legacy shape silently disables MCP discovery; `/mcps` shows an empty list and agent tool calls fail because no MCP tools are exposed. The installer deep-merges only the `mcp` key into `.kilo/kilo.json`, so user-added `instructions` / `skills.paths` / `permission` keys in that file are preserved across `update`.
 - **Dumping the whole `1c-rules` repo into the project as a vendor subfolder.** Symptom: `./1c-rules/AGENTS.md`, `./1c-rules/content/...` appearing under the project / config directory and being referenced from the tool's entry config. The protocol places files **per section** at the adapter's `copyTo` targets; the source clone is only a staging area outside the project. Vendoring the source tree leaves `AGENTS.md` with unrewritten `content/...` paths and the tool with no skill discovery.
 - **Hand-rolling frontmatter transforms with `node -e` / inline scripts.** Symptom: ad-hoc one-liners that only convert `modelHint → model` and forget `frontmatter.drop` / `addIf` rules. Use the adapter operations as a whole (read the YAML once, apply `keep` / `drop` / `rename` / `addIf` in one pass, write back) or run `install.ps1`, which already implements them.

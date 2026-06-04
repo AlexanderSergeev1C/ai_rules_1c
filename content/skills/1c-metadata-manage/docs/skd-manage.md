@@ -369,16 +369,37 @@ powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-skd-validate/
 | 1 | Errors found |
 
 ---
+## 5. Decompile — Extract JSON DSL from Template.xml (draft)
+
+Reverse of `1c-skd-compile`: reads an existing `Template.xml` (DataCompositionSchema) and reconstructs the JSON DSL consumed by `1c-skd-compile`. Use it to capture an existing report's schema as editable DSL, diff two schemas, or bootstrap a new schema from a working sample.
+
+> **Draft (v0.90).** Round-trip is best-effort — complex hand-tuned schemas may not reproduce byte-for-byte. Always re-validate (`1c-skd-validate`) and visually compare (`1c-skd-info`) after a decompile → edit → compile cycle.
+
+### Parameters and Command
+
+| Parameter | Description |
+|-----------|-------------|
+| `TemplatePath` (alias `Path`) | Path to the `Template.xml` of a Data Composition Schema |
+| `OutputPath` | (opt.) Write JSON DSL to this file; prints to stdout when omitted |
+
+```powershell
+powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-skd-decompile/scripts/skd-decompile.ps1 -TemplatePath "<Template.xml>" [-OutputPath "<schema.json>"]
+```
+
+Fails fast (exit 2) when the root element is not `DataCompositionSchema` (e.g. a spreadsheet document — use `1c-mxl-decompile` instead).
+
+---
 ## Typical Workflow
 
 1. **Create new DCS**: `1c-skd-compile` from JSON → `1c-skd-validate` → `1c-skd-info` for visual summary
 2. **Modify existing DCS**: `1c-skd-edit` with operations → `1c-skd-validate` → `1c-skd-info`
 3. **Analyze structure**: `1c-skd-info` overview → `1c-skd-info -Mode trace -Name <field>` for field calculation chain → `1c-skd-info -Mode query -Name <dataset>` for query text → `1c-skd-info -Mode variant -Name <N>` for variant groupings and filters
+4. **Capture existing DCS as DSL**: `1c-skd-decompile` → edit the JSON → `1c-skd-compile` → `1c-skd-validate` (round-trip, draft)
 
 ---
-## Recent Additions (upstream `w-2026-05-17`)
+## Recent Additions (upstream sync `w-2026-05-31`)
 
-The PowerShell scripts under `tools/1c-skd-{compile,edit,info,validate}/scripts/` were refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills). Highlights:
+The PowerShell scripts under `tools/1c-skd-{compile,edit,info,validate}/scripts/` were refreshed again from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (`skd-compile` → v1.104, `skd-edit` → v1.24, `skd-info` → v1.5, `skd-validate` → v1.2), and the new `1c-skd-decompile` tool (draft, v0.90 — see section 5) was added. Highlights from the prior `w-2026-05-17` batch still apply:
 
 ### `skd-edit` — new operations and flags
 

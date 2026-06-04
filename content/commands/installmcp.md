@@ -365,6 +365,22 @@ Kilo Code (`mcp` key, per-server `type` + `enabled`, see https://kilo.ai/docs/au
 
 For Kilo Code do **not** write into the legacy `.kilocode/mcp.json` with the `mcpServers` dictionary — current Kilo CLI / Kilo Code (v7.x+) does not read that file, and the result is a silently empty `/mcps` listing. `.kilo/kilo.json` is the shared Kilo config (carries `instructions`, `skills.paths`, `permission`, custom agent overrides…). If the file already exists with such keys, **merge only the top-level `mcp` key** — do not overwrite the whole file.
 
+OpenCode (`mcp` key) — **the server key MUST start with a letter**. OpenCode names MCP tools `<server-key>_<tool>` and some providers (Moonshot/Kimi) reject function names that do not start with a letter, failing the whole request with *"function name is invalid, must start with a letter"*. Use `onec-` instead of the leading `1c`/`1C`:
+
+```json
+{
+  "mcp": {
+    "onec-docs-mcp":           { "type": "remote", "url": "http://localhost:8003/mcp" },
+    "onec-graph-metadata-mcp": { "type": "remote", "url": "http://localhost:8006/mcp" },
+    "onec-code-metadata-mcp":  { "type": "remote", "url": "http://localhost:8000/mcp" },
+    "onec-ssl-mcp":            { "type": "remote", "url": "http://localhost:8008/mcp" },
+    "onec-templates-mcp":      { "type": "remote", "url": "http://localhost:8004/mcp" },
+    "onec-syntax-checker-mcp": { "type": "remote", "url": "http://localhost:8002/mcp" },
+    "onec-code-check-mcp":     { "type": "remote", "url": "http://localhost:8007/mcp" }
+  }
+}
+```
+
 Keep only the servers that were actually installed. If the project has `.ai-rules.json`, the MCP config is rendered by the 1c-rules installer (which already implements the per-client table above and deep-merges Kilo's `mcp` key) — re-render through `/updaterules` instead of editing the file manually. Ask the user to restart the client (Cursor / Claude Code / Codex / OpenCode / Kilo Code) so the MCP session is reinitialized.
 
 ### 8. Final check

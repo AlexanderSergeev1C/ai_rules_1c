@@ -327,7 +327,13 @@ function Invoke-YamlBlock {
             $result[$key] = ($blockLines -join "`n") + "`n"
         }
         elseif ($rawVal -eq '') {
-            # Nested block — could be dict or array
+            # Nested block — could be dict or array. Skip blank lines first
+            # (comment-only lines are blanked by the comment stripper above);
+            # otherwise a comment between `key:` and its first child would be
+            # mistaken for an empty value and break the nesting detection.
+            while ($Parser.Index -lt $Parser.Lines.Count -and (Test-YamlBlank $Parser.Lines[$Parser.Index])) {
+                $Parser.Index++
+            }
             if ($Parser.Index -lt $Parser.Lines.Count) {
                 $next = $Parser.Lines[$Parser.Index]
                 $nextIndent = Get-YamlIndent $next
@@ -498,6 +504,21 @@ function Format-FrontmatterEntry {
         return "${Key}: $s"
     }
     if ($Value -is [int]) { return "${Key}: $Value" }
+    if ($Value -is [System.Collections.IDictionary]) {
+        # Nested block-style dict (e.g. OpenCode `permission:` object).
+        $lines = @("${Key}:")
+        foreach ($subKey in $Value.Keys) {
+            $subVal = $Value[$subKey]
+            $rendered =
+                if ($null -eq $subVal) { '' }
+                elseif ($subVal -is [bool]) { if ($subVal) { 'true' } else { 'false' } }
+                elseif ($subVal -is [int]) { "$subVal" }
+                elseif ($subVal -is [string]) { Format-FrontmatterStringValue $subVal }
+                else { [string]$subVal }
+            $lines += "  ${subKey}: $rendered"
+        }
+        return ($lines -join "`n")
+    }
     if ($Value -is [array]) {
         $items = @($Value | ForEach-Object { Format-FrontmatterInlineString $_ })
         return "${Key}: [$(($items -join ', '))]"
@@ -542,6 +563,38 @@ function Invoke-FrontmatterOps {
     $drop = if ($Ops.drop) { @($Ops.drop) } else { @() }
     $rename = if ($Ops.rename) { $Ops.rename } else { @{} }
     $addIf = if ($Ops.addIf) { $Ops.addIf } else { @{} }
+    $toolsToPermission = if ($Ops.toolsToPermission) { $Ops.toolsToPermission } else { $null }
+
+    # Phase 0: tools array -> permission object (OpenCode).
+    # Runs BEFORE keep/drop so it can still read the source `tools` list.
+    # Each mapped source tool present in the list -> `grant` (allow);
+    # every mapped permission key NOT granted -> `deny`, so a read-only agent
+    # (no Write/Edit/Shell in its `tools`) is actually denied edit/bash instead
+    # of falling back to OpenCode's permissive default tool set.
+    if ($toolsToPermission) {
+        $srcKey = if ($toolsToPermission.source) { $toolsToPermission.source } else { 'tools' }
+        $grantVal = if ($toolsToPermission.grant) { $toolsToPermission.grant } else { 'allow' }
+        $denyVal = if ($toolsToPermission.deny) { $toolsToPermission.deny } else { 'deny' }
+        $map = $toolsToPermission.map
+        if ($map -and $src.Contains($srcKey)) {
+            $granted = @($src[$srcKey])
+            $permission = [ordered]@{}
+            foreach ($srcTool in $map.Keys) {
+                $permKey = $map[$srcTool]
+                if ([string]::IsNullOrEmpty([string]$permKey)) { continue }
+                $isGranted = $granted -contains $srcTool
+                if (-not $permission.Contains($permKey)) {
+                    $permission[$permKey] = if ($isGranted) { $grantVal } else { $denyVal }
+                }
+                elseif ($isGranted) {
+                    # Multiple source tools can map to one key (Write/Edit -> edit):
+                    # any granting tool wins.
+                    $permission[$permKey] = $grantVal
+                }
+            }
+            if ($permission.Keys.Count -gt 0) { $src['permission'] = $permission }
+        }
+    }
 
     # Phase 1: keep/drop filtering
     if ($keep.Count -gt 0) {
@@ -933,7 +986,39 @@ function New-McpConfig-Other {
     return New-McpConfig-Cursor $Servers
 }
 
+function ConvertTo-OpenCodeMcpKey {
+    # OpenCode exposes MCP tools to the model as `<server-key>_<tool>`, taking
+    # the key verbatim from the `mcp` object (it only replaces characters
+    # outside [a-zA-Z0-9_-] with `_`, it does NOT force a leading letter). Some
+    # providers — Moonshot/Kimi in particular — reject any function name that
+    # does not start with a letter (`^[a-zA-Z_][a-zA-Z0-9-_]{2,63}$`), so a key
+    # like `1c-syntax-checker-mcp` produces `1c-syntax-checker-mcp_syntaxcheck`
+    # and the whole request fails with "function name is invalid, must start
+    # with a letter". Normalize the well-known `1c`/`1C` prefix to the readable
+    # `onec`; guarantee any other non-letter-leading id also starts with a
+    # letter. Canonical ids in content/mcp-servers.json stay `1c-...`; only the
+    # OpenCode-rendered key changes (tool detection in /checkmcp keys off the
+    # bare tool names, not the server prefix, so it is unaffected).
+    param([string]$Id)
+    $key = $Id
+    if ($key -match '^1c(.*)$') { $key = 'onec' + $Matches[1] }
+    if ($key -notmatch '^[A-Za-z]') { $key = 'mcp-' + $key }
+    return $key
+}
+
 function New-McpConfig-OpenCode {
+    # OpenCode MCP schema (https://opencode.ai/docs/mcp-servers/). The config
+    # goes into `opencode.json` at the PROJECT ROOT (see adapters/opencode.yaml
+    # > mcp.target) — NOT `.opencode/opencode.json`, which OpenCode never reads.
+    # Each entry is validated with Zod `.strict()`: ONLY the documented keys are
+    # allowed, and any unknown key (e.g. `description`, `connection_id`) makes
+    # OpenCode reject the whole config so the servers silently never load.
+    # Emit only:
+    #   remote -> { type: "remote", url, enabled }
+    #   local  -> { type: "local",  command: [...], enabled, environment? }
+    # `enabled: true` is written explicitly (matches OpenCode's documented
+    # examples). `$schema` is added for editor validation; on merge an existing
+    # `$schema` is preserved.
     param([array]$Servers)
     $mcp = [ordered]@{}
     foreach ($s in $Servers) {
@@ -946,11 +1031,12 @@ function New-McpConfig-OpenCode {
             $entry['type'] = 'local'
             $cmd = @($s.command) + @($s.args)
             $entry['command'] = $cmd
+            if ($s.env) { $entry['environment'] = $s.env }
         }
-        if ($s.description) { $entry['description'] = $s.description }
-        $mcp[$s.id] = $entry
+        $entry['enabled'] = $true
+        $mcp[(ConvertTo-OpenCodeMcpKey $s.id)] = $entry
     }
-    $root = [ordered]@{ mcp = $mcp }
+    $root = [ordered]@{ '$schema' = 'https://opencode.ai/config.json'; mcp = $mcp }
     return (ConvertTo-Json $root -Depth 10)
 }
 
@@ -2169,10 +2255,15 @@ function Invoke-McpPhase {
         }
 
         Write-TextFile -Path $absTarget -Content ($finalContent + "`n")
-        $Manifest.files[$target] = [ordered]@{
+        $mcpEntry = [ordered]@{
             source        = 'content/mcp-servers.json'
             installedHash = (Get-FileSha256 $absTarget)
         }
+        # `merged` marks a SHARED config (opencode.json / .kilo/kilo.json) that
+        # carries user keys besides `mcp`. On `remove`, such a file must NOT be
+        # deleted — only its top-level `mcp` key is stripped (see Invoke-Remove).
+        if ($mergeRequested) { $mcpEntry['merged'] = $true }
+        $Manifest.files[$target] = $mcpEntry
         Write-Info "  [$tool] MCP config: $target"
     }
 }
@@ -2707,6 +2798,26 @@ function Invoke-Init {
         $bundleTag = if ($os.Contains('artifactsBundleVersion') -and $os['artifactsBundleVersion']) { " [artefacts v$($os['artifactsBundleVersion'])]" } else { '' }
         Write-Info "  OpenSpec$scaffoldedTag$bundleTag : $($os.files.Count) user file(s) in specs/changes"
     }
+
+    Write-RestartRecommendation -ActiveTools $activeTools -McpCount $manifest.mcpServers.Count
+}
+
+# Tell the user to restart their AI client so it re-reads the freshly written
+# MCP config (and agent definitions). Most clients — OpenCode in particular —
+# load these only at startup, so MCP servers and new agents do not appear in an
+# already-running session until the client / CLI is restarted.
+function Write-RestartRecommendation {
+    param(
+        [string[]]$ActiveTools,
+        [int]$McpCount = 0
+    )
+    if ($McpCount -le 0) { return }
+    Write-Info ""
+    Write-Info "ВАЖНО: перезапустите AI-клиент (CLI / IDE), чтобы он перечитал MCP-конфигурацию и определения агентов."
+    Write-Info "       MCP-серверы и новые субагенты подхватываются только при старте клиента — без перезапуска они не появятся в текущей сессии."
+    if ($ActiveTools -contains 'opencode') {
+        Write-Info "       OpenCode: полностью завершите и заново запустите сессию OpenCode (config читается при старте)."
+    }
 }
 
 function Invoke-Verify {
@@ -2875,6 +2986,7 @@ function Invoke-Update {
 
     Write-Manifest -Root $Root -Manifest $manifest
     Write-Info 'Update complete.'
+    Write-RestartRecommendation -ActiveTools $activeTools -McpCount $manifest.mcpServers.Count
 }
 
 function Invoke-Add {
@@ -2929,6 +3041,44 @@ function Invoke-Add {
     $manifest.updatedAt = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     Write-Manifest -Root $Root -Manifest $manifest
     Write-Info "Added rules for $NewTool."
+    Write-RestartRecommendation -ActiveTools $activeTools -McpCount $manifest.mcpServers.Count
+}
+
+# Strip ONLY the top-level `mcp` key from a SHARED tool config that the
+# installer deep-merged into (opencode.json / .kilo/kilo.json). Deleting the
+# whole file on `remove` would destroy the user's own config (model, theme,
+# instructions, skills.paths, permissions…). If after removing `mcp` nothing
+# meaningful is left (empty, or only a `$schema` marker the installer added),
+# delete the now-pointless file.
+function Remove-McpKeyFromConfig {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return }
+    try {
+        $raw = Get-Content -Path $Path -Raw -ErrorAction Stop
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        # Not valid JSON — do not touch a file we cannot safely parse.
+        return
+    }
+    $kept = [ordered]@{}
+    foreach ($prop in $obj.PSObject.Properties) {
+        if ($prop.Name -eq 'mcp') { continue }
+        $kept[$prop.Name] = $prop.Value
+    }
+    $meaningful = @($kept.Keys | Where-Object { $_ -ne '$schema' })
+    if ($meaningful.Count -eq 0) {
+        Remove-Item -Force $Path -ErrorAction SilentlyContinue
+        return
+    }
+    Write-TextFile -Path $Path -Content ((ConvertTo-Json $kept -Depth 20) + "`n")
+}
+
+# True when a manifest file entry marks a shared, deep-merged MCP config
+# (see Invoke-McpPhase). Such files are stripped, not deleted, on removal.
+function Test-MergedMcpEntry {
+    param($Entry)
+    return ($Entry -is [System.Collections.IDictionary] -and $Entry.Contains('merged') -and $Entry['merged'])
 }
 
 function Invoke-Remove {
@@ -2962,7 +3112,14 @@ function Invoke-Remove {
         }
         foreach ($rel in $toRemove) {
             $abs = Join-Path $Root $rel
-            if (Test-Path $abs) { Remove-Item -Force $abs -ErrorAction SilentlyContinue }
+            if (Test-MergedMcpEntry $manifest.files[$rel]) {
+                # Shared config (opencode.json / .kilo/kilo.json): strip the
+                # `mcp` key only, never delete the user's whole config.
+                Remove-McpKeyFromConfig -Path $abs
+            }
+            elseif (Test-Path $abs) {
+                Remove-Item -Force $abs -ErrorAction SilentlyContinue
+            }
             $manifest.files.Remove($rel)
         }
         $manifest.tools = @($manifest.tools | Where-Object { $_ -ne $ScopeTool })
@@ -2984,7 +3141,14 @@ function Invoke-Remove {
         Write-Info 'Removing all installed files.'
         foreach ($rel in @($manifest.files.Keys)) {
             $abs = Join-Path $Root $rel
-            if (Test-Path $abs) { Remove-Item -Force $abs -ErrorAction SilentlyContinue }
+            if (Test-MergedMcpEntry $manifest.files[$rel]) {
+                # Shared config (opencode.json / .kilo/kilo.json): strip the
+                # `mcp` key only, never delete the user's whole config.
+                Remove-McpKeyFromConfig -Path $abs
+            }
+            elseif (Test-Path $abs) {
+                Remove-Item -Force $abs -ErrorAction SilentlyContinue
+            }
         }
         Remove-Item -Force (Join-Path $Root $script:ManifestFileName) -ErrorAction SilentlyContinue
         # Clean up empty per-tool directories
