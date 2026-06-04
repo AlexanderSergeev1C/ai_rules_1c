@@ -381,6 +381,8 @@ OpenCode (`mcp` key) — **the server key MUST start with a letter**. OpenCode n
 }
 ```
 
+**Remote Mac (this fork).** Examples above use `localhost` and fixed ports for upstream single-machine installs. When `MCP_HOST` in `.dev.env` is a LAN address, `install.ps1 update` / `/updaterules` substitutes `http://{MCP_HOST}:<port>/mcp` from `MCP_PORT_BASE`, `MCP_DOCS_PORT`, and the offsets in *Remote Mac workflow*; OpenCode keys stay `onec-*` (docs MCP may become `onec-docs-mcp-<platform-version>` after `idTemplate` resolution). Exclude `onec-graph-metadata-mcp` in remote v1.
+
 Keep only the servers that were actually installed. If the project has `.ai-rules.json`, the MCP config is rendered by the 1c-rules installer (which already implements the per-client table above and deep-merges Kilo's `mcp` key) — re-render through `/updaterules` instead of editing the file manually. Ask the user to restart the client (Cursor / Claude Code / Codex / OpenCode / Kilo Code) so the MCP session is reinitialized.
 
 ### 8. Final check
